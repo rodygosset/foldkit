@@ -2,6 +2,7 @@ import { Effect, Option, Predicate, Schema, pipe } from 'effect'
 
 import * as AsyncData from '../../asyncData/index.js'
 import * as Command from '../../command/index.js'
+import { defineTaggedUnion } from '../../schema/index.js'
 import * as Update from '../../update/index.js'
 
 export type FoldLens<ParentModel, ParentMessage, ChildModel, ChildMessage> =
@@ -37,7 +38,12 @@ export type LiftConfig<ParentModel, ParentMessage, ChildModel, ChildMessage> =
   | ParentFieldConfig<ParentModel, ParentMessage, ChildModel, ChildMessage>
   | FoldLens<ParentModel, ParentMessage, ChildModel, ChildMessage>
 
-export type LiftQuery<ChildModel, ChildMessage, R> = {
+export type LiftQuery<
+  ChildModel,
+  ChildMessage,
+  FetchRequirements,
+  UpdateRequirements = never,
+> = {
   <ParentModel, ParentMessage>(
     config: ParentFieldConfig<
       ParentModel,
@@ -45,13 +51,31 @@ export type LiftQuery<ChildModel, ChildMessage, R> = {
       ChildModel,
       ChildMessage
     >,
-  ): LiftedQuery<ParentModel, ParentMessage, ChildMessage, R>
+  ): LiftedQuery<
+    ParentModel,
+    ParentMessage,
+    ChildMessage,
+    FetchRequirements,
+    UpdateRequirements
+  >
   <ParentModel, ParentMessage>(
     config: FoldLens<ParentModel, ParentMessage, ChildModel, ChildMessage>,
-  ): LiftedQuery<ParentModel, ParentMessage, ChildMessage, R>
+  ): LiftedQuery<
+    ParentModel,
+    ParentMessage,
+    ChildMessage,
+    FetchRequirements,
+    UpdateRequirements
+  >
 }
 
-export type LiftKeyedQuery<ChildModel, ChildMessage, Args, R> = {
+export type LiftKeyedQuery<
+  ChildModel,
+  ChildMessage,
+  Args,
+  FetchRequirements,
+  UpdateRequirements = never,
+> = {
   <ParentModel, ParentMessage>(
     config: ParentFieldConfig<
       ParentModel,
@@ -59,10 +83,24 @@ export type LiftKeyedQuery<ChildModel, ChildMessage, Args, R> = {
       ChildModel,
       ChildMessage
     >,
-  ): LiftedKeyedQuery<ParentModel, ParentMessage, ChildMessage, Args, R>
+  ): LiftedKeyedQuery<
+    ParentModel,
+    ParentMessage,
+    ChildMessage,
+    Args,
+    FetchRequirements,
+    UpdateRequirements
+  >
   <ParentModel, ParentMessage>(
     config: FoldLens<ParentModel, ParentMessage, ChildModel, ChildMessage>,
-  ): LiftedKeyedQuery<ParentModel, ParentMessage, ChildMessage, Args, R>
+  ): LiftedKeyedQuery<
+    ParentModel,
+    ParentMessage,
+    ChildMessage,
+    Args,
+    FetchRequirements,
+    UpdateRequirements
+  >
 }
 
 export const isParentFieldConfig = <
@@ -137,7 +175,18 @@ export type QueryStore<Model, Args, A, E, Message, R> = Readonly<{
     args: Args,
     data: AsyncData.AsyncData<A, E>,
   ) => Readonly<{ model: Model; generation: number }>
-  fetch: (args: Args, generation: number) => Command.Command<Message, never, R>
+  fetch: (
+    model: Model,
+    args: Args,
+    generation: number,
+  ) => Command.Command<Message, never, R>
+  interrupt?:
+    | ((
+        model: Model,
+        args: Args,
+        intent: CancelIntent,
+      ) => Command.Command<Message>)
+    | undefined
 }>
 
 export const applyTransition = <Model, Args, A, E, Message, R>(
@@ -153,21 +202,62 @@ export const applyTransition = <Model, Args, A, E, Message, R>(
 
       return {
         model: queryStart.model,
-        commands: [store.fetch(args, queryStart.generation)],
+        commands: [store.fetch(queryStart.model, args, queryStart.generation)],
       }
     },
   })
+
+/** Reason carried by a completed Query Fetch cancellation. */
+export const CancelIntent = defineTaggedUnion({
+  Replace: {},
+  Forget: {},
+})
+
+/** Reason carried by a completed Query Fetch cancellation. */
+export type CancelIntent = typeof CancelIntent.Type
+
+const replacementTransition: AsyncDataTransition = data =>
+  AsyncData.isPending(data)
+    ? Option.some(data)
+    : AsyncData.revalidateOrLoad(data)
 
 export const replaceEntry = <Model, Args, A, E, Message, R>(
   store: QueryStore<Model, Args, A, E, Message, R>,
   model: Model,
   args: Args,
+): Update.Return<Model, Message, R> => {
+  if (
+    AsyncData.isPending(store.read(model, args)) &&
+    store.interrupt !== undefined
+  ) {
+    return {
+      model,
+      commands: [store.interrupt(model, args, CancelIntent.Replace())],
+    }
+  }
+
+  return applyTransition(store, model, args, replacementTransition)
+}
+
+export const completeCancel = <Model, Args, A, E, Message, R>(
+  store: QueryStore<Model, Args, A, E, Message, R>,
+  model: Model,
+  args: Args,
+  intent: CancelIntent,
 ): Update.Return<Model, Message, R> =>
-  applyTransition(store, model, args, data =>
-    AsyncData.isPending(data)
-      ? Option.some(data)
-      : AsyncData.revalidateOrLoad(data),
-  )
+  CancelIntent.match<Update.Return<Model, Message, R>>(intent, {
+    Replace: () => applyTransition(store, model, args, replacementTransition),
+    Forget: () => ({ model }),
+  })
+
+const encodeFetchIdentity = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.Number])),
+)
+
+export const encodeInterruptKey = (
+  instanceId: string,
+  generation: number,
+): string => encodeFetchIdentity([instanceId, generation])
 
 export const runExecute = <A, E, R>(
   execute: Effect.Effect<A, E, R>,
@@ -187,23 +277,55 @@ export type KeyedArgs<Fields extends Schema.Struct.Fields> = Schema.Schema.Type<
   Schema.Struct<Fields>
 >
 
-type LiftedQuery<ParentModel, ParentMessage, ChildMessage, R> = Readonly<{
-  fold: Update.Fold<ParentModel, ParentMessage, ChildMessage>
+type LiftedQuery<
+  ParentModel,
+  ParentMessage,
+  ChildMessage,
+  FetchRequirements,
+  UpdateRequirements,
+> = Readonly<{
+  fold: Update.Fold<
+    ParentModel,
+    ParentMessage,
+    ChildMessage,
+    UpdateRequirements
+  >
   reset: Update.Step<ParentModel, ParentMessage>
-  revalidate: Update.Step<ParentModel, ParentMessage, R>
-  revalidateOrLoad: Update.Step<ParentModel, ParentMessage, R>
-  loadIfMissing: Update.Step<ParentModel, ParentMessage, R>
-  replace: Update.Step<ParentModel, ParentMessage, R>
+  revalidate: Update.Step<ParentModel, ParentMessage, FetchRequirements>
+  revalidateOrLoad: Update.Step<ParentModel, ParentMessage, FetchRequirements>
+  loadIfMissing: Update.Step<ParentModel, ParentMessage, FetchRequirements>
+  replace: Update.Step<ParentModel, ParentMessage, FetchRequirements>
 }>
 
-type LiftedKeyedQuery<ParentModel, ParentMessage, ChildMessage, Args, R> =
-  Readonly<{
-    fold: Update.Fold<ParentModel, ParentMessage, ChildMessage>
-    reset: Update.Step<ParentModel, ParentMessage>
-    revalidate: Update.Fold<ParentModel, ParentMessage, Args, R>
-    revalidateOrLoad: Update.Fold<ParentModel, ParentMessage, Args, R>
-    loadIfMissing: Update.Fold<ParentModel, ParentMessage, Args, R>
-    replace: Update.Fold<ParentModel, ParentMessage, Args, R>
-    forget: Update.Fold<ParentModel, ParentMessage, Args>
-    retainOnly: Update.Fold<ParentModel, ParentMessage, ReadonlyArray<Args>>
-  }>
+type LiftedKeyedQuery<
+  ParentModel,
+  ParentMessage,
+  ChildMessage,
+  Args,
+  FetchRequirements,
+  UpdateRequirements,
+> = Readonly<{
+  fold: Update.Fold<
+    ParentModel,
+    ParentMessage,
+    ChildMessage,
+    UpdateRequirements
+  >
+  reset: Update.Step<ParentModel, ParentMessage>
+  revalidate: Update.Fold<ParentModel, ParentMessage, Args, FetchRequirements>
+  revalidateOrLoad: Update.Fold<
+    ParentModel,
+    ParentMessage,
+    Args,
+    FetchRequirements
+  >
+  loadIfMissing: Update.Fold<
+    ParentModel,
+    ParentMessage,
+    Args,
+    FetchRequirements
+  >
+  replace: Update.Fold<ParentModel, ParentMessage, Args, FetchRequirements>
+  forget: Update.Fold<ParentModel, ParentMessage, Args>
+  retainOnly: Update.Fold<ParentModel, ParentMessage, ReadonlyArray<Args>>
+}>
