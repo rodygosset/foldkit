@@ -330,7 +330,7 @@ describe('Query.define policy routing', () => {
     )
   })
 
-  it('replace while loading starts a new fetch and ignores the old result', () => {
+  it('replace while loading starts the next fetch immediately', () => {
     const started = notes.informLoadIfMissing(notes.init())
     const replaced = notes.informReplace(started.model)
     expect(notes.read(replaced.model)).toEqual(AsyncData.Loading())
@@ -355,6 +355,134 @@ describe('Query.define policy routing', () => {
     )
     expect(notes.read(current.model)).toEqual(
       AsyncData.Success({ data: hello }),
+    )
+  })
+})
+
+describe('Query.define interrupt', function () {
+  const interruptibleNotes = Query.define({
+    name: 'Notes',
+    data: Schema.Array(Note),
+    error: Schema.String,
+    execute: Effect.succeed(hello),
+    interrupt: true,
+  })
+
+  const interruptibleNoteById = Query.define({
+    name: 'Note',
+    data: Note,
+    error: Schema.String,
+    args: { noteId: Schema.String },
+    execute: ({ noteId }) => Effect.succeed({ id: noteId, body: 'hello' }),
+    interrupt: true,
+  })
+
+  it('gives each init its own instance id', function () {
+    const first = interruptibleNotes.init()
+    const second = interruptibleNotes.init()
+    expect(first.instanceId).not.toEqual(second.instanceId)
+  })
+
+  it('keys the fetch by the instance id', function () {
+    const model = interruptibleNotes.init()
+    const started = interruptibleNotes.informLoadIfMissing(model)
+    expect(started.commands?.map(commandShape)).toEqual([
+      {
+        name: 'FetchNotes',
+        args: { requestId: 0, instanceId: model.instanceId },
+        key: `FetchNotes:${model.instanceId}`,
+      },
+    ])
+  })
+
+  it('keys a keyed fetch by the instance id and the slot', function () {
+    const first = interruptibleNoteById.init()
+    const second = interruptibleNoteById.init()
+    const firstFetch = interruptibleNoteById.informLoadIfMissing(first, {
+      noteId: '1',
+    })
+    const secondFetch = interruptibleNoteById.informLoadIfMissing(second, {
+      noteId: '1',
+    })
+    const slot = slotKey({ noteId: '1' })
+    expect(firstFetch.commands?.map(commandShape)).toEqual([
+      {
+        name: 'FetchNote',
+        args: {
+          requestId: 0,
+          instanceId: first.instanceId,
+          userArgs: { noteId: '1' },
+        },
+        key: `FetchNote:${first.instanceId}:${slot}`,
+      },
+    ])
+    expect(secondFetch.commands?.map(command => command.key)).toEqual([
+      `FetchNote:${second.instanceId}:${slot}`,
+    ])
+    expect(first.instanceId).not.toEqual(second.instanceId)
+  })
+
+  it('replace while loading waits for the cancel, then starts the next fetch', function () {
+    const started = interruptibleNotes.informLoadIfMissing(
+      interruptibleNotes.init(),
+    )
+    const replaced = interruptibleNotes.informReplace(started.model)
+    expect(interruptibleNotes.read(replaced.model)).toEqual(AsyncData.Loading())
+    expect(replaced.model.maybePendingRequestId).toEqual(Option.some(0))
+    expect(replaced.commands?.map(command => command.name)).toEqual([
+      'FetchNotes.Interrupt',
+    ])
+    expect(
+      replaced.commands?.map(function (command) {
+        return 'interruptsKey' in command ? command.interruptsKey : undefined
+      }),
+    ).toEqual([`FetchNotes:${started.model.instanceId}`])
+
+    const cancelled = interruptibleNotes.update(
+      replaced.model,
+      interruptibleNotes.Message.CompletedCancelFetch({
+        requestId: 0,
+        outcome: { _tag: 'Interrupted' },
+        intent: { _tag: 'Replace' },
+      }),
+    )
+    expect(cancelled.model.maybePendingRequestId).toEqual(Option.some(1))
+    expect(cancelled.commands?.map(commandShape)).toEqual([
+      {
+        name: 'FetchNotes',
+        args: { requestId: 1, instanceId: started.model.instanceId },
+        key: `FetchNotes:${started.model.instanceId}`,
+      },
+    ])
+  })
+
+  it('a cancel for a forgotten request does not start another fetch', function () {
+    const started = interruptibleNotes.informLoadIfMissing(
+      interruptibleNotes.init(),
+    )
+    const forgotten = interruptibleNotes.informForget(started.model)
+    expect(interruptibleNotes.read(forgotten.model)).toEqual(AsyncData.Idle())
+    expect(forgotten.model.maybePendingRequestId).toEqual(Option.none())
+    expect(forgotten.commands?.map(command => command.name)).toEqual([
+      'FetchNotes.Interrupt',
+    ])
+
+    const watched = interruptibleNotes.informWatch(forgotten.model)
+    expect(interruptibleNotes.read(watched.model)).toEqual(AsyncData.Loading())
+    expect(watched.model.maybePendingRequestId).toEqual(Option.some(1))
+
+    const staleCancel = interruptibleNotes.update(
+      watched.model,
+      interruptibleNotes.Message.CompletedCancelFetch({
+        requestId: 0,
+        outcome: { _tag: 'Interrupted' },
+        intent: { _tag: 'Replace' },
+      }),
+    )
+    expect(staleCancel.model).toBe(watched.model)
+    expect(staleCancel.commands).toBeUndefined()
+    expect(interruptibleNotes.read(staleCancel.model)).toEqual(
+      AsyncData.Loading(),
     )
   })
 })
@@ -811,6 +939,9 @@ describe('Query.Query and Query.KeyedQuery types', () => {
         readonly noteId: string
         readonly preview: boolean
       }
+    }>()
+    expectTypeOf(notes.Fetch).parameter(0).toEqualTypeOf<{
+      readonly requestId: number
     }>()
     expectTypeOf(noteByIdAndLocale.Fetch).parameter(0).toEqualTypeOf<{
       readonly requestId: number

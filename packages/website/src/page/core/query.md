@@ -20,6 +20,16 @@ Add `args` for a KeyedQuery. Omit `toKey` to JSON-encode args. Read a slot with 
 
 `args` fields are `Schema.Codec`s with no encoding or decoding services.
 
+## Interrupt a fetch
+
+Omit `interrupt` and a running Fetch finishes. update ignores a `SettledFetch` whose `requestId` is no longer pending.
+
+Pass `interrupt: true` when forget or replace should stop that Effect. `init` stores `instanceId` on the Model. The interrupt key is that id. A KeyedQuery adds the slot key. Two calls to `init` do not share a key.
+
+`CompletedCancelFetch` carries the `requestId` that was pending when the Interrupt Command was built. update starts the replacement only when that id is still pending.
+
+::Snippet{name="queryInterrupt" label="interrupt: true"}
+
 ## Lift into a parent
 
 `query.lift` returns a child record. Bind it as `postsChild`. Pass `toParentMessage`, the same adapter `Update.foldChild` takes. A `Got*` handler calls `postsChild.fold(model, message)`. Policy Steps live on the same record, such as `postsChild.revalidateOrLoad(model)`.

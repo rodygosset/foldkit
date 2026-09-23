@@ -1,4 +1,5 @@
 export { define } from './index.js'
+export { CancelIntent } from './internal.js'
 export type { Lifted } from './internal.js'
 export type {
   KeyedQuery,

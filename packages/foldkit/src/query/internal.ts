@@ -2,6 +2,9 @@ import { Effect, Match, Option, Predicate, Schema, pipe } from 'effect'
 
 import * as AsyncData from '../asyncData/index.js'
 import * as Command from '../command/index.js'
+import * as Interruptible from '../command/interruptible/index.js'
+import { defineMessageUnion } from '../message/index.js'
+import { defineTaggedUnion } from '../schema/index.js'
 import * as Subscription from '../subscription/subscription.js'
 import * as Update from '../update/index.js'
 
@@ -112,6 +115,27 @@ export function parentKeyToLens<
   }
 }
 
+// NOTE: Nested Command.Interruptible.Outcome in defineMessageUnion collapses
+// through tsup to `node_modules/foldkit/dist/schema` (and sometimes
+// `outcome?: any`). Tags match Outcome.
+export const FetchInterruptOutcome = defineMessageUnion({
+  Interrupted: {},
+  NotFound: {},
+})
+
+/** The reason an interruptible Fetch was cancelled. `CompletedCancelFetch` carries it.
+ * For `Replace`, update starts the next fetch when this `requestId` is still pending.
+ * For `Forget`, update leaves the slot dropped. */
+export const CancelIntent = defineTaggedUnion({
+  Replace: {},
+  Forget: {},
+})
+
+/** The reason an interruptible Fetch was cancelled. `CompletedCancelFetch` carries it.
+ * For `Replace`, update starts the next fetch when this `requestId` is still pending.
+ * For `Forget`, update leaves the slot dropped. */
+export type CancelIntent = typeof CancelIntent.Type
+
 export const foldChildFromInform = <
   ParentModel,
   ParentMessage,
@@ -140,6 +164,8 @@ const transitionFor = (policy: Policy): Transition =>
     Match.exhaustive,
   )
 
+export const createInstanceId = (): string => crypto.randomUUID()
+
 export const allocateRequestId = (
   nextRequestId: number,
 ): Readonly<{
@@ -167,8 +193,32 @@ export type CacheStore<Model, Args, A, E, Message, R> = Readonly<{
     data: AsyncData.AsyncData<A, E>,
   ) => Readonly<{ model: Model; requestId: number }>
   isCurrent: (model: Model, args: Args, requestId: number) => boolean
-  load: (args: Args, requestId: number) => Command.Command<Message, never, R>
+  load: (
+    args: Args,
+    requestId: number,
+    model: Model,
+  ) => Command.Command<Message, never, R>
+  interrupt?: (
+    model: Model,
+    args: Args,
+    intent: CancelIntent,
+  ) => Command.Command<Message, never, R>
 }>
+
+export type InterruptibleCacheStore<Model, Args, A, E, Message, R> = CacheStore<
+  Model,
+  Args,
+  A,
+  E,
+  Message,
+  R
+> & {
+  interrupt: (
+    model: Model,
+    args: Args,
+    intent: CancelIntent,
+  ) => Command.Command<Message, never, R>
+}
 
 export const applyPolicy = <Model, Args, A, E, Message, R>(
   store: CacheStore<Model, Args, A, E, Message, R>,
@@ -182,7 +232,7 @@ export const applyPolicy = <Model, Args, A, E, Message, R>(
       const begun = store.begin(model, args, nextData)
       return {
         model: begun.model,
-        commands: [store.load(args, begun.requestId)],
+        commands: [store.load(args, begun.requestId, begun.model)],
       }
     },
   })
@@ -195,12 +245,40 @@ export function replaceSlot<Model, Args, A, E, Message, R>(
   if (!AsyncData.isPending(store.read(model, args)))
     return applyPolicy(store, model, args, 'revalidateOrLoad')
 
+  if (store.interrupt !== undefined)
+    return {
+      model,
+      commands: [store.interrupt(model, args, CancelIntent.Replace())],
+    }
+
   const begun = store.begin(model, args, store.read(model, args))
   return {
     model: begun.model,
-    commands: [store.load(args, begun.requestId)],
+    commands: [store.load(args, begun.requestId, begun.model)],
   }
 }
+
+export const completeCancel = <Model, Args, A, E, Message, R>(
+  store: CacheStore<Model, Args, A, E, Message, R>,
+  model: Model,
+  args: Args,
+  outcome: Interruptible.Outcome,
+  intent: CancelIntent,
+): Update.Return<Model, Message, R> =>
+  Interruptible.Outcome.match<Update.Return<Model, Message, R>>(outcome, {
+    Interrupted: () =>
+      CancelIntent.match<Update.Return<Model, Message, R>>(intent, {
+        Replace() {
+          const begun = store.begin(model, args, store.read(model, args))
+          return {
+            model: begun.model,
+            commands: [store.load(args, begun.requestId, begun.model)],
+          }
+        },
+        Forget: () => ({ model }),
+      }),
+    NotFound: () => ({ model }),
+  })
 
 export const runExecute = <A, E, R>(
   execute: Effect.Effect<A, E, R>,
