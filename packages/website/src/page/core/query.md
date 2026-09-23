@@ -24,7 +24,7 @@ Add `args` for a KeyedQuery. Omit `toKey` to JSON-encode args. Read a slot with 
 
 Omit `interrupt` and a running Fetch finishes. update ignores a `SettledFetch` whose `requestId` is no longer pending.
 
-Pass `interrupt: true` when forget or replace should stop that Effect. `init` stores `instanceId` on the Model. The interrupt key is that id. A KeyedQuery adds the slot key. Two calls to `init` do not share a key.
+Pass `interrupt: true` when forget or replace should stop that Effect. Pass `instanceId` to `init`. The interrupt key is that id. A KeyedQuery adds the slot key. Two Models with different ids do not share a key.
 
 `CompletedCancelFetch` carries the `requestId` that was pending when the Interrupt Command was built. update starts the replacement only when that id is still pending.
 

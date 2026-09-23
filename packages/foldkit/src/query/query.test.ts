@@ -377,14 +377,17 @@ describe('Query.define interrupt', function () {
     interrupt: true,
   })
 
-  it('gives each init its own instance id', function () {
-    const first = interruptibleNotes.init()
-    const second = interruptibleNotes.init()
-    expect(first.instanceId).not.toEqual(second.instanceId)
+  it('stores the instance id passed to init', function () {
+    expectTypeOf(interruptibleNotes.init).parameter(0).toEqualTypeOf<string>()
+    expectTypeOf(interruptibleNoteById.init).parameter(0).toEqualTypeOf<string>()
+    const sidebar = interruptibleNotes.init('sidebar')
+    const home = interruptibleNotes.init('home')
+    expect(sidebar.instanceId).toBe('sidebar')
+    expect(home.instanceId).toBe('home')
   })
 
   it('keys the fetch by the instance id', function () {
-    const model = interruptibleNotes.init()
+    const model = interruptibleNotes.init('home')
     const started = interruptibleNotes.informLoadIfMissing(model)
     expect(started.commands?.map(commandShape)).toEqual([
       {
@@ -396,8 +399,8 @@ describe('Query.define interrupt', function () {
   })
 
   it('keys a keyed fetch by the instance id and the slot', function () {
-    const first = interruptibleNoteById.init()
-    const second = interruptibleNoteById.init()
+    const first = interruptibleNoteById.init('sidebar')
+    const second = interruptibleNoteById.init('home')
     const firstFetch = interruptibleNoteById.informLoadIfMissing(first, {
       noteId: '1',
     })
@@ -424,7 +427,7 @@ describe('Query.define interrupt', function () {
 
   it('replace while loading waits for the cancel, then starts the next fetch', function () {
     const started = interruptibleNotes.informLoadIfMissing(
-      interruptibleNotes.init(),
+      interruptibleNotes.init('home'),
     )
     const replaced = interruptibleNotes.informReplace(started.model)
     expect(interruptibleNotes.read(replaced.model)).toEqual(AsyncData.Loading())
@@ -458,7 +461,7 @@ describe('Query.define interrupt', function () {
 
   it('a cancel for a forgotten request does not start another fetch', function () {
     const started = interruptibleNotes.informLoadIfMissing(
-      interruptibleNotes.init(),
+      interruptibleNotes.init('home'),
     )
     const forgotten = interruptibleNotes.informForget(started.model)
     expect(interruptibleNotes.read(forgotten.model)).toEqual(AsyncData.Idle())
@@ -940,6 +943,7 @@ describe('Query.Query and Query.KeyedQuery types', () => {
         readonly preview: boolean
       }
     }>()
+    expectTypeOf(notes.init).parameters.toEqualTypeOf<[]>()
     expectTypeOf(notes.Fetch).parameter(0).toEqualTypeOf<{
       readonly requestId: number
     }>()

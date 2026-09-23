@@ -164,8 +164,6 @@ const transitionFor = (policy: Policy): Transition =>
     Match.exhaustive,
   )
 
-export const createInstanceId = (): string => crypto.randomUUID()
-
 export const allocateRequestId = (
   nextRequestId: number,
 ): Readonly<{

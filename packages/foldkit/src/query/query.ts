@@ -19,7 +19,6 @@ import {
   allocateRequestId,
   applyPolicy,
   completeCancel,
-  createInstanceId,
   isParentKeyFoldConfig,
   parentKeyToLens,
   replaceSlot,
@@ -154,7 +153,9 @@ export interface Query<
           R
         >
       >
-  readonly init: () => QueryModel<A, AI, E, EI, Interrupt>['Type']
+  readonly init: Interrupt extends true
+    ? (instanceId: string) => QueryModel<A, AI, E, EI, true>['Type']
+    : () => QueryModel<A, AI, E, EI, false>['Type']
   readonly read: (
     model: QueryModel<A, AI, E, EI, Interrupt>['Type'],
   ) => AsyncData.AsyncData<A, E>
@@ -579,8 +580,8 @@ export function defineInterruptibleQuery<Name extends string, A, AI, E, EI, R>(
   const informForget = (model: Model): UpdateReturn =>
     update(model, Message.RequestedForget())
 
-  const init = (): Model => ({
-    instanceId: createInstanceId(),
+  const init = (instanceId: string): Model => ({
+    instanceId,
     nextRequestId: 0,
     maybePendingRequestId: Option.none(),
     data: AsyncData.Idle(),
