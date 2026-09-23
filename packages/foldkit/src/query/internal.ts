@@ -2,6 +2,7 @@ import { Effect, Match, Option, Predicate, Schema, pipe } from 'effect'
 
 import * as AsyncData from '../asyncData/index.js'
 import * as Command from '../command/index.js'
+import * as Subscription from '../subscription/subscription.js'
 import * as Update from '../update/index.js'
 
 export type Policy = 'loadIfMissing' | 'revalidate' | 'revalidateOrLoad'
@@ -67,7 +68,7 @@ export type LiftKeyedQuery<ChildModel, ChildMessage, Args, R> = {
   ): Lifted.KeyedQuery<ParentModel, ParentMessage, ChildMessage, Args, R>
 }
 
-export function isParentKeyFoldConfig<
+export const isParentKeyFoldConfig = <
   ParentModel,
   ParentMessage,
   ChildModel,
@@ -77,9 +78,7 @@ export function isParentKeyFoldConfig<
 ): config is Extract<
   LiftConfig<ParentModel, ParentMessage, ChildModel, ChildMessage>,
   { readonly field: string }
-> {
-  return Predicate.hasProperty(config, 'field')
-}
+> => Predicate.hasProperty(config, 'field')
 
 function setField<O extends Record<K, V>, K extends string, V>(
   model: O,
@@ -141,10 +140,34 @@ const transitionFor = (policy: Policy): Transition =>
     Match.exhaustive,
   )
 
+export const allocateRequestId = (
+  nextRequestId: number,
+): Readonly<{
+  requestId: number
+  nextRequestId: number
+}> => ({
+  requestId: nextRequestId,
+  nextRequestId: nextRequestId + 1,
+})
+
+export const sameRequest = (
+  maybePendingRequestId: Option.Option<number>,
+  requestId: number,
+): boolean =>
+  Option.match(maybePendingRequestId, {
+    onNone: () => false,
+    onSome: pendingRequestId => pendingRequestId === requestId,
+  })
+
 export type CacheStore<Model, Args, A, E, Message, R> = Readonly<{
   read: (model: Model, args: Args) => AsyncData.AsyncData<A, E>
-  write: (model: Model, args: Args, data: AsyncData.AsyncData<A, E>) => Model
-  load: (args: Args) => Command.Command<Message, never, R>
+  begin: (
+    model: Model,
+    args: Args,
+    data: AsyncData.AsyncData<A, E>,
+  ) => Readonly<{ model: Model; requestId: number }>
+  isCurrent: (model: Model, args: Args, requestId: number) => boolean
+  load: (args: Args, requestId: number) => Command.Command<Message, never, R>
 }>
 
 export const applyPolicy = <Model, Args, A, E, Message, R>(
@@ -155,11 +178,29 @@ export const applyPolicy = <Model, Args, A, E, Message, R>(
 ): Update.Return<Model, Message, R> =>
   Option.match(transitionFor(policy)(store.read(model, args)), {
     onNone: () => ({ model }),
-    onSome: nextData => ({
-      model: store.write(model, args, nextData),
-      commands: [store.load(args)],
-    }),
+    onSome(nextData) {
+      const begun = store.begin(model, args, nextData)
+      return {
+        model: begun.model,
+        commands: [store.load(args, begun.requestId)],
+      }
+    },
   })
+
+export function replaceSlot<Model, Args, A, E, Message, R>(
+  store: CacheStore<Model, Args, A, E, Message, R>,
+  model: Model,
+  args: Args,
+): Update.Return<Model, Message, R> {
+  if (!AsyncData.isPending(store.read(model, args)))
+    return applyPolicy(store, model, args, 'revalidateOrLoad')
+
+  const begun = store.begin(model, args, store.read(model, args))
+  return {
+    model: begun.model,
+    commands: [store.load(args, begun.requestId)],
+  }
+}
 
 export const runExecute = <A, E, R>(
   execute: Effect.Effect<A, E, R>,
@@ -190,6 +231,18 @@ export namespace Lifted {
     revalidate: Update.Step<ParentModel, ParentMessage, R>
     revalidateOrLoad: Update.Step<ParentModel, ParentMessage, R>
     loadIfMissing: Update.Step<ParentModel, ParentMessage, R>
+    replace: Update.Step<ParentModel, ParentMessage, R>
+    watch: Update.Step<ParentModel, ParentMessage, R>
+    forget: Update.Step<ParentModel, ParentMessage, R>
+    watchSubscription: (
+      entry: Subscription.EntryBuilder<ParentModel, ParentMessage, R>,
+      modelToIsWatching: (model: ParentModel) => boolean,
+    ) => Subscription.EntryWithoutKeepAlive<
+      ParentModel,
+      ParentMessage,
+      { readonly isWatching: boolean },
+      R
+    >
   }>
 
   export type KeyedQuery<
@@ -203,5 +256,17 @@ export namespace Lifted {
     revalidate: Update.Fold<ParentModel, ParentMessage, Args, R>
     revalidateOrLoad: Update.Fold<ParentModel, ParentMessage, Args, R>
     loadIfMissing: Update.Fold<ParentModel, ParentMessage, Args, R>
+    replace: Update.Fold<ParentModel, ParentMessage, Args, R>
+    watch: Update.Fold<ParentModel, ParentMessage, ReadonlyArray<Args>, R>
+    forget: Update.Fold<ParentModel, ParentMessage, Args, R>
+    watchSubscription: (
+      entry: Subscription.EntryBuilder<ParentModel, ParentMessage, R>,
+      modelToArgs: (model: ParentModel) => ReadonlyArray<Args>,
+    ) => Subscription.EntryWithoutKeepAlive<
+      ParentModel,
+      ParentMessage,
+      { readonly args: ReadonlyArray<Args> },
+      R
+    >
   }>
 }

@@ -84,7 +84,63 @@ const stringNeedingEncode = Schema.flip(stringNeedingDecode)
 const noteSlot = (noteId: string, data: AsyncData.AsyncData<Note, string>) => ({
   args: { noteId },
   data,
+  maybePendingRequestId: Option.none(),
 })
+
+function withNotes(
+  data: AsyncData.AsyncData<ReadonlyArray<Note>, string>,
+): ReturnType<typeof notes.init> {
+  return {
+    ...notes.init(),
+    data,
+  }
+}
+
+function pendingNotes(
+  data: AsyncData.AsyncData<ReadonlyArray<Note>, string>,
+  requestId: number,
+): ReturnType<typeof notes.init> {
+  return {
+    ...notes.init(),
+    data,
+    maybePendingRequestId: Option.some(requestId),
+    nextRequestId: requestId + 1,
+  }
+}
+
+function notesFetch(requestId: number) {
+  return {
+    name: 'FetchNotes',
+    args: { requestId },
+    key: undefined,
+  }
+}
+
+function withNoteSlot(
+  model: ReturnType<typeof noteById.init>,
+  noteId: string,
+  data: AsyncData.AsyncData<Note, string>,
+): ReturnType<typeof noteById.init> {
+  return {
+    ...model,
+    slots: HashMap.set(
+      model.slots,
+      slotKey({ noteId }),
+      noteSlot(noteId, data),
+    ),
+  }
+}
+
+function noteFetch(noteId: string, requestId: number) {
+  return {
+    name: 'FetchNote',
+    args: {
+      requestId,
+      userArgs: { noteId },
+    },
+    key: undefined,
+  }
+}
 
 const commandShape = (command: {
   readonly name: string
@@ -134,100 +190,172 @@ describe('Query.define schema inputs', function () {
 describe('Query.define policy routing', () => {
   it('revalidateOrLoad starts a cold Query and leaves Loading and Refreshing alone', () => {
     const started = notes.informRevalidateOrLoad(notes.init())
-    expect(started.model).toEqual(AsyncData.Loading())
-    expect(started.commands?.map(commandShape)).toEqual([
-      commandShape(notes.Fetch()),
-    ])
+    expect(notes.read(started.model)).toEqual(AsyncData.Loading())
+    expect(started.commands?.map(commandShape)).toEqual([notesFetch(0)])
 
     const ignoredLoading = notes.informRevalidateOrLoad(started.model)
     expect(ignoredLoading.model).toBe(started.model)
     expect(ignoredLoading.commands).toBeUndefined()
 
-    const refreshing = AsyncData.Refreshing({ data: hello })
+    const refreshing = withNotes(AsyncData.Refreshing({ data: hello }))
     const ignoredRefreshing = notes.informRevalidateOrLoad(refreshing)
     expect(ignoredRefreshing.model).toBe(refreshing)
     expect(ignoredRefreshing.commands).toBeUndefined()
   })
 
   it('revalidate refreshes Success and Stale and is a no-op on Idle and Failure', () => {
-    const success = AsyncData.Success({ data: hello })
+    const success = withNotes(AsyncData.Success({ data: hello }))
     const fromSuccess = notes.informRevalidate(success)
-    expect(fromSuccess.model).toEqual(AsyncData.Refreshing({ data: hello }))
-    expect(fromSuccess.commands?.map(commandShape)).toEqual([
-      commandShape(notes.Fetch()),
-    ])
+    expect(notes.read(fromSuccess.model)).toEqual(
+      AsyncData.Refreshing({ data: hello }),
+    )
+    expect(fromSuccess.commands?.map(commandShape)).toEqual([notesFetch(0)])
 
-    const stale = AsyncData.Stale({ error: 'boom', data: hello })
+    const stale = withNotes(AsyncData.Stale({ error: 'boom', data: hello }))
     const fromStale = notes.informRevalidate(stale)
-    expect(fromStale.model).toEqual(AsyncData.Refreshing({ data: hello }))
-    expect(fromStale.commands?.map(commandShape)).toEqual([
-      commandShape(notes.Fetch()),
-    ])
+    expect(notes.read(fromStale.model)).toEqual(
+      AsyncData.Refreshing({ data: hello }),
+    )
+    expect(fromStale.commands?.map(commandShape)).toEqual([notesFetch(0)])
 
     const idle = notes.init()
     expect(notes.informRevalidate(idle)).toEqual({ model: idle })
-    const failure = AsyncData.Failure({ error: 'boom' })
+    const failure = withNotes(AsyncData.Failure({ error: 'boom' }))
     expect(notes.informRevalidate(failure)).toEqual({ model: failure })
   })
 
   it('loadIfMissing loads Idle and Failure and does not refetch Success or Stale', () => {
-    const loaded = AsyncData.Success({ data: hello })
+    const loaded = withNotes(AsyncData.Success({ data: hello }))
     const successHit = notes.informLoadIfMissing(loaded)
     expect(successHit.model).toBe(loaded)
     expect(successHit.commands).toBeUndefined()
 
-    const stale = AsyncData.Stale({ error: 'boom', data: hello })
+    const stale = withNotes(AsyncData.Stale({ error: 'boom', data: hello }))
     const staleHit = notes.informLoadIfMissing(stale)
     expect(staleHit.model).toBe(stale)
     expect(staleHit.commands).toBeUndefined()
 
     const fromIdle = notes.informLoadIfMissing(notes.init())
-    expect(fromIdle.model).toEqual(AsyncData.Loading())
-    expect(fromIdle.commands?.map(commandShape)).toEqual([
-      commandShape(notes.Fetch()),
-    ])
+    expect(notes.read(fromIdle.model)).toEqual(AsyncData.Loading())
+    expect(fromIdle.commands?.map(commandShape)).toEqual([notesFetch(0)])
 
     const fromFailure = notes.informLoadIfMissing(
-      AsyncData.Failure({ error: 'boom' }),
+      withNotes(AsyncData.Failure({ error: 'boom' })),
     )
-    expect(fromFailure.model).toEqual(AsyncData.Loading())
-    expect(fromFailure.commands?.map(commandShape)).toEqual([
-      commandShape(notes.Fetch()),
-    ])
+    expect(notes.read(fromFailure.model)).toEqual(AsyncData.Loading())
+    expect(fromFailure.commands?.map(commandShape)).toEqual([notesFetch(0)])
   })
 
   it('SettledFetch on Idle leaves the Query Idle', () => {
     const idle = notes.init()
     const settled = notes.update(
       idle,
-      notes.Message.SettledFetch({ result: Result.succeed(hello) }),
+      notes.Message.SettledFetch({
+        requestId: 0,
+        result: Result.succeed(hello),
+      }),
     )
     expect(settled).toEqual({ model: idle })
   })
 
   it('settle keeps last-good data when a refresh fails', () => {
+    const loading = pendingNotes(AsyncData.Loading(), 0)
     const success = notes.update(
-      AsyncData.Loading(),
-      notes.Message.SettledFetch({ result: Result.succeed(hello) }),
+      loading,
+      notes.Message.SettledFetch({
+        requestId: 0,
+        result: Result.succeed(hello),
+      }),
     )
-    expect(success.model).toEqual(AsyncData.Success({ data: hello }))
+    expect(notes.read(success.model)).toEqual(
+      AsyncData.Success({ data: hello }),
+    )
 
     const refreshing = notes.informRevalidate(success.model)
-    expect(refreshing.model).toEqual(AsyncData.Refreshing({ data: hello }))
+    expect(notes.read(refreshing.model)).toEqual(
+      AsyncData.Refreshing({ data: hello }),
+    )
 
     const stale = notes.update(
       refreshing.model,
-      notes.Message.SettledFetch({ result: Result.fail('boom') }),
+      notes.Message.SettledFetch({
+        requestId: 1,
+        result: Result.fail('boom'),
+      }),
     )
-    expect(stale.model).toEqual(AsyncData.Stale({ error: 'boom', data: hello }))
+    expect(notes.read(stale.model)).toEqual(
+      AsyncData.Stale({ error: 'boom', data: hello }),
+    )
   })
 
   it('a failed initial load becomes Failure', () => {
     const failed = notes.update(
-      AsyncData.Loading(),
-      notes.Message.SettledFetch({ result: Result.fail('boom') }),
+      pendingNotes(AsyncData.Loading(), 0),
+      notes.Message.SettledFetch({
+        requestId: 0,
+        result: Result.fail('boom'),
+      }),
     )
-    expect(failed.model).toEqual(AsyncData.Failure({ error: 'boom' }))
+    expect(notes.read(failed.model)).toEqual(
+      AsyncData.Failure({ error: 'boom' }),
+    )
+  })
+
+  it('a stale SettledFetch after forget and watch does not write', () => {
+    const started = notes.informLoadIfMissing(notes.init())
+    const forgotten = notes.informForget(started.model)
+    expect(notes.read(forgotten.model)).toEqual(AsyncData.Idle())
+
+    const watched = notes.informWatch(forgotten.model)
+    expect(notes.read(watched.model)).toEqual(AsyncData.Loading())
+
+    const stale = notes.update(
+      watched.model,
+      notes.Message.SettledFetch({
+        requestId: 0,
+        result: Result.succeed(hello),
+      }),
+    )
+    expect(notes.read(stale.model)).toEqual(AsyncData.Loading())
+
+    const current = notes.update(
+      watched.model,
+      notes.Message.SettledFetch({
+        requestId: 1,
+        result: Result.succeed(hello),
+      }),
+    )
+    expect(notes.read(current.model)).toEqual(
+      AsyncData.Success({ data: hello }),
+    )
+  })
+
+  it('replace while loading starts a new fetch and ignores the old result', () => {
+    const started = notes.informLoadIfMissing(notes.init())
+    const replaced = notes.informReplace(started.model)
+    expect(notes.read(replaced.model)).toEqual(AsyncData.Loading())
+    expect(replaced.model.maybePendingRequestId).toEqual(Option.some(1))
+    expect(replaced.commands?.map(commandShape)).toEqual([notesFetch(1)])
+
+    const stale = notes.update(
+      replaced.model,
+      notes.Message.SettledFetch({
+        requestId: 0,
+        result: Result.succeed(hello),
+      }),
+    )
+    expect(notes.read(stale.model)).toEqual(AsyncData.Loading())
+
+    const current = notes.update(
+      replaced.model,
+      notes.Message.SettledFetch({
+        requestId: 1,
+        result: Result.succeed(hello),
+      }),
+    )
+    expect(notes.read(current.model)).toEqual(
+      AsyncData.Success({ data: hello }),
+    )
   })
 })
 
@@ -239,14 +367,12 @@ describe('Query.define KeyedQuery isolation', () => {
     expect(noteById.read(missing.model, { noteId: '1' })).toEqual(
       AsyncData.Loading(),
     )
-    expect(missing.commands?.map(commandShape)).toEqual([
-      commandShape(noteById.Fetch({ noteId: '1' })),
-    ])
+    expect(missing.commands?.map(commandShape)).toEqual([noteFetch('1', 0)])
 
-    const loaded = HashMap.set(
+    const loaded = withNoteSlot(
       noteById.init(),
-      slotKey({ noteId: '1' }),
-      noteSlot('1', AsyncData.Success({ data: { id: '1', body: 'hello' } })),
+      '1',
+      AsyncData.Success({ data: { id: '1', body: 'hello' } }),
     )
     const hit = noteById.informLoadIfMissing(loaded, { noteId: '1' })
     expect(hit.model).toBe(loaded)
@@ -265,18 +391,16 @@ describe('Query.define KeyedQuery isolation', () => {
   })
 
   it('revalidate refreshes a Success key', () => {
-    const loaded = HashMap.set(
+    const loaded = withNoteSlot(
       noteById.init(),
-      slotKey({ noteId: '1' }),
-      noteSlot('1', AsyncData.Success({ data: { id: '1', body: 'hello' } })),
+      '1',
+      AsyncData.Success({ data: { id: '1', body: 'hello' } }),
     )
     const refreshed = noteById.informRevalidate(loaded, { noteId: '1' })
     expect(noteById.read(refreshed.model, { noteId: '1' })).toEqual(
       AsyncData.Refreshing({ data: { id: '1', body: 'hello' } }),
     )
-    expect(refreshed.commands?.map(commandShape)).toEqual([
-      commandShape(noteById.Fetch({ noteId: '1' })),
-    ])
+    expect(refreshed.commands?.map(commandShape)).toEqual([noteFetch('1', 0)])
   })
 
   it('settle writes only the matching key and leaves a sibling Loading', () => {
@@ -286,14 +410,13 @@ describe('Query.define KeyedQuery isolation', () => {
     const bothPending = noteById.informLoadIfMissing(pendingOne.model, {
       noteId: '2',
     })
-    expect(bothPending.commands?.map(commandShape)).toEqual([
-      commandShape(noteById.Fetch({ noteId: '2' })),
-    ])
+    expect(bothPending.commands?.map(commandShape)).toEqual([noteFetch('2', 1)])
 
     const settled = noteById.update(
       bothPending.model,
       noteById.Message.SettledFetch({
         args: { noteId: '1' },
+        requestId: 0,
         result: Result.succeed({ id: '1', body: 'hello' }),
       }),
     )
@@ -312,10 +435,50 @@ describe('Query.define KeyedQuery isolation', () => {
       model,
       noteById.Message.SettledFetch({
         args: { noteId: '1' },
+        requestId: 0,
         result: Result.succeed({ id: '1', body: 'hello' }),
       }),
     )
     expect(settled).toEqual({ model })
+  })
+
+  it('a stale SettledFetch after forget and watch does not write the new slot', () => {
+    const started = noteById.informLoadIfMissing(noteById.init(), {
+      noteId: '1',
+    })
+    const forgotten = noteById.informForget(started.model, { noteId: '1' })
+    expect(noteById.read(forgotten.model, { noteId: '1' })).toEqual(
+      AsyncData.Idle(),
+    )
+
+    const watched = noteById.informWatch(forgotten.model, [{ noteId: '1' }])
+    expect(noteById.read(watched.model, { noteId: '1' })).toEqual(
+      AsyncData.Loading(),
+    )
+
+    const stale = noteById.update(
+      watched.model,
+      noteById.Message.SettledFetch({
+        args: { noteId: '1' },
+        requestId: 0,
+        result: Result.succeed({ id: '1', body: 'stale' }),
+      }),
+    )
+    expect(noteById.read(stale.model, { noteId: '1' })).toEqual(
+      AsyncData.Loading(),
+    )
+
+    const current = noteById.update(
+      watched.model,
+      noteById.Message.SettledFetch({
+        args: { noteId: '1' },
+        requestId: 1,
+        result: Result.succeed({ id: '1', body: 'hello' }),
+      }),
+    )
+    expect(noteById.read(current.model, { noteId: '1' })).toEqual(
+      AsyncData.Success({ data: { id: '1', body: 'hello' } }),
+    )
   })
 })
 
@@ -351,23 +514,33 @@ describe('Query.lift', () => {
       update,
       Story.given({ notes: notes.init() }),
       Story.message(Message.ClickedLoad()),
-      Story.Command.expectHas(notes.Fetch()),
+      Story.Command.expectHas(notes.Fetch),
       Story.Command.resolve(
-        notes.Fetch(),
-        notes.Message.SettledFetch({ result: Result.succeed(hello) }),
+        notes.Fetch,
+        notes.Message.SettledFetch({
+          requestId: 0,
+          result: Result.succeed(hello),
+        }),
       ),
       Story.model(function (model) {
-        expect(model.notes).toEqual(AsyncData.Success({ data: hello }))
+        expect(notes.read(model.notes)).toEqual(
+          AsyncData.Success({ data: hello }),
+        )
       }),
     )
   })
 
   it('fold applies SettledFetch through the child Message', () => {
     const folded = notesChild.fold(
-      { notes: AsyncData.Loading() },
-      notes.Message.SettledFetch({ result: Result.succeed(hello) }),
+      { notes: pendingNotes(AsyncData.Loading(), 0) },
+      notes.Message.SettledFetch({
+        requestId: 0,
+        result: Result.succeed(hello),
+      }),
     )
-    expect(folded.model.notes).toEqual(AsyncData.Success({ data: hello }))
+    expect(notes.read(folded.model.notes)).toEqual(
+      AsyncData.Success({ data: hello }),
+    )
   })
 })
 
@@ -395,9 +568,7 @@ describe('Query.lift KeyedQuery', () => {
     expect(noteById.read(started.model.notes, { noteId: '1' })).toEqual(
       AsyncData.Loading(),
     )
-    expect(started.commands?.map(commandShape)).toEqual([
-      commandShape(noteById.Fetch({ noteId: '1' })),
-    ])
+    expect(started.commands?.map(commandShape)).toEqual([noteFetch('1', 0)])
   })
 
   it('fold applies SettledFetch through the parent wrapper', () => {
@@ -409,6 +580,7 @@ describe('Query.lift KeyedQuery', () => {
       pending.model,
       noteById.Message.SettledFetch({
         args: { noteId: '1' },
+        requestId: 0,
         result: Result.succeed({ id: '1', body: 'hello' }),
       }),
     )
@@ -460,13 +632,16 @@ describe('Query.lift parent-key vs lens', () => {
         return Message.GotNotesMessage({ message })
       },
     })
-    const parent = { notes: AsyncData.Loading() }
+    const parent = { notes: pendingNotes(AsyncData.Loading(), 0) }
     const message = notes.Message.SettledFetch({
+      requestId: 0,
       result: Result.succeed(hello),
     })
     const dataFirst = notesChild.fold(parent, message)
     const dataLast = notesChild.fold(message)(parent)
-    expect(dataFirst.model.notes).toEqual(AsyncData.Success({ data: hello }))
+    expect(notes.read(dataFirst.model.notes)).toEqual(
+      AsyncData.Success({ data: hello }),
+    )
     expect(Equal.equals(dataFirst.model.notes, dataLast.model.notes)).toBe(true)
   })
 })
@@ -484,10 +659,12 @@ describe('Query.define KeyedQuery toKey', () => {
       noteByIdAndLocale.read(started.model, { noteId: '1', locale: 'en' }),
     ).toEqual(AsyncData.Loading())
     expect(
-      HashMap.has(started.model, slotKey({ noteId: '1', locale: 'en' })),
+      HashMap.has(started.model.slots, slotKey({ noteId: '1', locale: 'en' })),
     ).toBe(true)
-    expect(HashMap.has(started.model, slotKey({ noteId: '1' }))).toBe(false)
-    expect(HashMap.has(started.model, '1:en')).toBe(false)
+    expect(HashMap.has(started.model.slots, slotKey({ noteId: '1' }))).toBe(
+      false,
+    )
+    expect(HashMap.has(started.model.slots, '1:en')).toBe(false)
   })
 
   it('a custom toKey shares one slot across extra args', () => {
@@ -503,8 +680,8 @@ describe('Query.define KeyedQuery toKey', () => {
       preview: false,
     })
     expect(sameKey.commands).toBeUndefined()
-    expect(HashMap.has(pending.model, '1')).toBe(true)
-    expect(HashMap.size(pending.model)).toBe(1)
+    expect(HashMap.has(pending.model.slots, '1')).toBe(true)
+    expect(HashMap.size(pending.model.slots)).toBe(1)
   })
 
   it('omitted toKey gives each extra-arg combo its own slot', () => {
@@ -523,7 +700,7 @@ describe('Query.define KeyedQuery toKey', () => {
       noteId: '1',
       preview: false,
     })
-    expect(HashMap.size(second.model)).toBe(2)
+    expect(HashMap.size(second.model.slots)).toBe(2)
   })
 })
 
@@ -629,12 +806,18 @@ describe('Query.Query and Query.KeyedQuery types', () => {
     }
     takesKeyedQuery(noteById)
     expectTypeOf(noteByIdPreview.Fetch).parameter(0).toEqualTypeOf<{
-      readonly noteId: string
-      readonly preview: boolean
+      readonly requestId: number
+      readonly userArgs: {
+        readonly noteId: string
+        readonly preview: boolean
+      }
     }>()
     expectTypeOf(noteByIdAndLocale.Fetch).parameter(0).toEqualTypeOf<{
-      readonly noteId: string
-      readonly locale: string
+      readonly requestId: number
+      readonly userArgs: {
+        readonly noteId: string
+        readonly locale: string
+      }
     }>()
     expectTypeOf(noteById.informLoadIfMissing).toEqualTypeOf<
       Update.Fold<

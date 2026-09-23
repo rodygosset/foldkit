@@ -202,7 +202,8 @@ export const subscriptions = Subscription.make<Model, Message>()(entry => ({
     {
       modelToDependencies: model => ({
         isObservingStats:
-          model.activeTab === 'Stats' && AsyncData.hasData(model.stats),
+          model.activeTab === 'Stats' &&
+          AsyncData.hasData(statsQuery.read(model.stats)),
       }),
       dependenciesToStream: ({ isObservingStats }) =>
         Stream.when(
@@ -213,6 +214,12 @@ export const subscriptions = Subscription.make<Model, Message>()(entry => ({
           Effect.sync(() => isObservingStats),
         ),
     },
+  ),
+  watchPostDetail: postDetailChild.watchSubscription(entry, model =>
+    Option.match(model.maybeSelectedPostId, {
+      onNone: () => [],
+      onSome: postId => [{ postId }],
+    }),
   ),
 }))
 
@@ -294,7 +301,7 @@ const headerView = (h: HtmlBuilder<Message>): Html =>
       h.p(
         [h.Class('text-slate-600')],
         [
-          'Query.define owns the fetch and the keyed slots. The parent folds Got* Messages and user intent.',
+          'Query.define owns fetch, watch, forget, and keyed slots. The parent folds Got* Messages and user intent.',
         ],
       ),
     ],
@@ -313,7 +320,8 @@ const postsTabView = (model: Model, h: HtmlBuilder<Message>): Html =>
   })
 
 const postsListView = (model: Model, h: HtmlBuilder<Message>): Html => {
-  const isPending = AsyncData.isPending(model.posts)
+  const posts = postsQuery.read(model.posts)
+  const isPending = AsyncData.isPending(posts)
 
   return h.div(
     [h.Class('flex flex-col gap-4')],
@@ -330,7 +338,7 @@ const postsListView = (model: Model, h: HtmlBuilder<Message>): Html => {
                 h.button(
                   [...attributes.button, h.Class(toolbarButtonClassName)],
                   [
-                    AsyncData.isRefreshing(model.posts)
+                    AsyncData.isRefreshing(posts)
                       ? 'Refreshing...'
                       : 'Invalidate',
                   ],
@@ -343,18 +351,18 @@ const postsListView = (model: Model, h: HtmlBuilder<Message>): Html => {
       h.p(
         [h.Class('text-sm text-slate-500')],
         [
-          'Open a post, then go back. The detail stays in the Query. Opening it again reads that slot and does not fetch.',
+          'Open a post, then go back. watchSubscription is the live key set. A dropped key forgets that slot. Open the same post again to load it fresh.',
         ],
       ),
-      AsyncData.matchDataSplitEmpty(model.posts, {
+      AsyncData.matchDataSplitEmpty(posts, {
         onIdle: () => loadingPanel('Loading posts...', h),
         onLoading: () => loadingPanel('Loading posts...', h),
         onFailure: error => errorPanel(error, Message.ClickedRetryPosts(), h),
-        onData: ({ posts }) =>
+        onData: ({ posts: postList }) =>
           h.div(
             [h.Class('flex flex-col gap-4')],
             [
-              ...Option.match(AsyncData.getError(model.posts), {
+              ...Option.match(AsyncData.getError(posts), {
                 onNone: () => [],
                 onSome: error => [
                   staleView(error, Message.ClickedRetryPosts(), h),
@@ -362,7 +370,7 @@ const postsListView = (model: Model, h: HtmlBuilder<Message>): Html => {
               }),
               h.ul(
                 [h.Class('flex flex-col gap-2')],
-                postListItems(posts, model.postDetailById, h),
+                postListItems(postList, model.postDetailById, h),
               ),
             ],
           ),
@@ -498,14 +506,15 @@ const postDetailCard = (
       h.p(
         [h.Class('text-xs text-slate-400')],
         [
-          `Fetched at ${formatFetchedAt(fetchedAt)}. Leaving this screen keeps the slot.`,
+          `Fetched at ${formatFetchedAt(fetchedAt)}. Leaving this screen forgets the slot. Open the post again to load it fresh.`,
         ],
       ),
     ],
   )
 
 const statsTabView = (model: Model, h: HtmlBuilder<Message>): Html => {
-  const isPending = AsyncData.isPending(model.stats)
+  const statsData = statsQuery.read(model.stats)
+  const isPending = AsyncData.isPending(statsData)
 
   return h.div(
     [h.Class('flex flex-col gap-4')],
@@ -534,7 +543,7 @@ const statsTabView = (model: Model, h: HtmlBuilder<Message>): Html => {
           'Stats refetch every 5 seconds while this tab is open. The old numbers stay on screen while the new ones load.',
         ],
       ),
-      AsyncData.matchDataSplitEmpty(model.stats, {
+      AsyncData.matchDataSplitEmpty(statsData, {
         onIdle: () => loadingPanel('Loading stats...', h),
         onLoading: () => loadingPanel('Loading stats...', h),
         onFailure: error => errorPanel(error, Message.ClickedRetryStats(), h),
@@ -542,7 +551,7 @@ const statsTabView = (model: Model, h: HtmlBuilder<Message>): Html => {
           h.div(
             [h.Class('flex flex-col gap-4')],
             [
-              ...Option.match(AsyncData.getError(model.stats), {
+              ...Option.match(AsyncData.getError(statsData), {
                 onNone: () => [],
                 onSome: error => [
                   staleView(error, Message.ClickedRetryStats(), h),
@@ -551,7 +560,7 @@ const statsTabView = (model: Model, h: HtmlBuilder<Message>): Html => {
               statsCards(
                 stats,
                 fetchedAt,
-                AsyncData.isRefreshing(model.stats),
+                AsyncData.isRefreshing(statsData),
                 h,
               ),
             ],

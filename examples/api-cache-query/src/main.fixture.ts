@@ -6,7 +6,7 @@ import { Tabs } from '@foldkit/ui'
 
 import type { Post, PostDetail, Stats } from './data'
 import type { Model } from './main'
-import { TABS_ID, postDetailQuery, statsQuery } from './main'
+import { TABS_ID, postDetailQuery, postsQuery, statsQuery } from './main'
 
 export const FETCHED_AT = 1_750_000_000_000
 
@@ -39,16 +39,26 @@ export const fixtureStats: Stats = {
 export const loadingPostsModel: Model = {
   tabs: Tabs.init({ id: TABS_ID }),
   activeTab: 'Posts',
-  posts: AsyncData.Loading(),
+  posts: {
+    ...postsQuery.init(),
+    data: AsyncData.Loading(),
+    maybePendingRequestId: Option.some(0),
+    nextRequestId: 1,
+  },
   postDetailById: postDetailQuery.init(),
   maybeSelectedPostId: Option.none(),
   stats: statsQuery.init(),
 }
 
 export const loadedPostsModel: Model = modifyFields(loadingPostsModel, {
-  posts: () =>
-    AsyncData.Success({
-      data: { posts: fixturePosts, fetchedAt: FETCHED_AT },
+  posts: posts =>
+    modifyFields(posts, {
+      data: () =>
+        AsyncData.Success({
+          data: { posts: fixturePosts, fetchedAt: FETCHED_AT },
+        }),
+      maybePendingRequestId: () => Option.none(),
+      nextRequestId: () => 0,
     }),
 })
 
@@ -59,19 +69,28 @@ const encodeKey = Schema.Struct({
 const firstPostArgs = { postId: 'first-post' }
 
 export const cachedFirstPostModel: Model = modifyFields(loadedPostsModel, {
-  postDetailById: () =>
-    HashMap.set(postDetailQuery.init(), encodeKey(firstPostArgs), {
-      args: firstPostArgs,
-      data: AsyncData.Success({
-        data: { detail: firstPostDetail, fetchedAt: FETCHED_AT },
-      }),
+  postDetailById: postDetailById =>
+    modifyFields(postDetailById, {
+      slots: slots =>
+        HashMap.set(slots, encodeKey(firstPostArgs), {
+          args: firstPostArgs,
+          data: AsyncData.Success({
+            data: { detail: firstPostDetail, fetchedAt: FETCHED_AT },
+          }),
+          maybePendingRequestId: Option.none(),
+        }),
     }),
 })
 
 export const loadedStatsModel: Model = modifyFields(loadedPostsModel, {
   activeTab: () => 'Stats',
-  stats: () =>
-    AsyncData.Success({
-      data: { stats: fixtureStats, fetchedAt: FETCHED_AT },
+  stats: stats =>
+    modifyFields(stats, {
+      data: () =>
+        AsyncData.Success({
+          data: { stats: fixtureStats, fetchedAt: FETCHED_AT },
+        }),
+      maybePendingRequestId: () => Option.none(),
+      nextRequestId: () => 0,
     }),
 })
