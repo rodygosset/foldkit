@@ -53,11 +53,13 @@ describe('view', () => {
       given(loadedPostsModel),
       click(role('button', { name: /First Post/ })),
       expect(text('Loading post...')).toExist(),
-      Command.expectExact(FetchPostDetail({ postId: 'first-post' })),
+      Command.expectExact(FetchPostDetail),
       Command.resolve(
         FetchPostDetail,
         postDetailQuery.Message.SettledFetch({
+          instanceId: 'post-detail',
           args: { postId: 'first-post' },
+          requestId: 0,
           result: Result.succeed({
             detail: firstPostDetail,
             fetchedAt: FETCHED_AT,
@@ -92,7 +94,9 @@ describe('view', () => {
       Command.resolve(
         FetchPostDetail,
         postDetailQuery.Message.SettledFetch({
+          instanceId: 'post-detail',
           args: { postId: 'first-post' },
+          requestId: 0,
           result: Result.fail('The connection dropped.'),
         }),
       ),
@@ -108,10 +112,12 @@ describe('view', () => {
       click(role('tab', { name: 'Stats' })),
       expect(text('Loading stats...')).toExist(),
       resolveFocusTab,
-      Command.expectExact(FetchStats()),
+      Command.expectExact(FetchStats),
       Command.resolve(
         FetchStats,
         statsQuery.Message.SettledFetch({
+          instanceId: 'stats',
+          requestId: 0,
           result: Result.succeed({
             stats: fixtureStats,
             fetchedAt: FETCHED_AT,

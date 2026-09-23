@@ -54,7 +54,7 @@ test('first visit to the Stats tab fetches stats', () => {
     update,
     given(loadedPostsModel),
     message(selectedStatsTab),
-    model(model => {
+    model(function (model) {
       expect(model.activeTab).toBe('Stats')
       expect(statsQuery.read(model.stats)._tag).toBe('Loading')
     }),
@@ -62,13 +62,15 @@ test('first visit to the Stats tab fetches stats', () => {
     Command.resolve(
       FetchStats,
       statsQuery.Message.SettledFetch({
+        instanceId: 'stats',
+        requestId: 0,
         result: Result.succeed({
           stats: fixtureStats,
           fetchedAt: FETCHED_AT,
         }),
       }),
     ),
-    model(model => {
+    model(function (model) {
       expect(statsQuery.read(model.stats)._tag).toBe('Success')
     }),
   )
@@ -84,7 +86,7 @@ test('returning to a tab with cached data does not refetch', () => {
     message(selectedStatsTab),
     resolveFocusTab,
     Command.expectNone(),
-    model(model => {
+    model(function (model) {
       expect(statsQuery.read(model.stats)._tag).toBe('Success')
     }),
   )
@@ -95,27 +97,29 @@ test('a revalidation tick keeps stale stats on screen while refetching', () => {
     update,
     given(loadedStatsModel),
     message(Message.TickedRevalidateStats()),
-    model(model => {
-      const statsData = statsQuery.read(model.stats)
-      expect(statsData._tag).toBe('Refreshing')
-      if (statsData._tag === 'Refreshing') {
-        expect(statsData.data.stats).toEqual(fixtureStats)
+    model(function (model) {
+      const stats = statsQuery.read(model.stats)
+      expect(stats._tag).toBe('Refreshing')
+      if (stats._tag === 'Refreshing') {
+        expect(stats.data.stats).toEqual(fixtureStats)
       }
     }),
     Command.resolve(
       FetchStats,
       statsQuery.Message.SettledFetch({
+        instanceId: 'stats',
+        requestId: 0,
         result: Result.succeed({
           stats: modifyFields(fixtureStats, { activeUsers: () => 99 }),
           fetchedAt: FETCHED_AT + 5000,
         }),
       }),
     ),
-    model(model => {
-      const statsData = statsQuery.read(model.stats)
-      expect(statsData._tag).toBe('Success')
-      if (statsData._tag === 'Success') {
-        expect(statsData.data.stats.activeUsers).toBe(99)
+    model(function (model) {
+      const stats = statsQuery.read(model.stats)
+      expect(stats._tag).toBe('Success')
+      if (stats._tag === 'Success') {
+        expect(stats.data.stats.activeUsers).toBe(99)
       }
     }),
   )
@@ -129,15 +133,17 @@ test('a failed refresh keeps the stale stats on screen with the error', () => {
     Command.resolve(
       FetchStats,
       statsQuery.Message.SettledFetch({
+        instanceId: 'stats',
+        requestId: 0,
         result: Result.fail('The server is down.'),
       }),
     ),
-    model(model => {
-      const statsData = statsQuery.read(model.stats)
-      expect(statsData._tag).toBe('Stale')
-      if (statsData._tag === 'Stale') {
-        expect(statsData.data.stats).toEqual(fixtureStats)
-        expect(statsData.error).toBe('The server is down.')
+    model(function (model) {
+      const stats = statsQuery.read(model.stats)
+      expect(stats._tag).toBe('Stale')
+      if (stats._tag === 'Stale') {
+        expect(stats.data.stats).toEqual(fixtureStats)
+        expect(stats.error).toBe('The server is down.')
       }
     }),
   )
@@ -148,7 +154,11 @@ test('refresh clicks during an in-flight fetch are deduplicated', () => {
     update,
     given(
       modifyFields(loadedStatsModel, {
-        stats: () => ({ data: AsyncData.Loading() }),
+        stats: stats =>
+          modifyFields(stats, {
+            data: () => AsyncData.Loading(),
+            maybePendingRequestId: () => Option.some(0),
+          }),
       }),
     ),
     message(Message.ClickedRefreshStats()),
@@ -161,11 +171,14 @@ test('a revalidation tick during a refresh is deduplicated', () => {
     update,
     given(
       modifyFields(loadedStatsModel, {
-        stats: () => ({
-          data: AsyncData.Refreshing({
-            data: { stats: fixtureStats, fetchedAt: FETCHED_AT },
+        stats: stats =>
+          modifyFields(stats, {
+            data: () =>
+              AsyncData.Refreshing({
+                data: { stats: fixtureStats, fetchedAt: FETCHED_AT },
+              }),
+            maybePendingRequestId: () => Option.some(0),
           }),
-        }),
       }),
     ),
     message(Message.TickedRevalidateStats()),
@@ -178,16 +191,18 @@ test('invalidating posts refetches while keeping the current list', () => {
     update,
     given(loadedPostsModel),
     message(Message.ClickedInvalidatePosts()),
-    model(model => {
-      const postsData = postsQuery.read(model.posts)
-      expect(postsData._tag).toBe('Refreshing')
-      if (postsData._tag === 'Refreshing') {
-        expect(postsData.data.posts).toEqual(fixturePosts)
+    model(function (model) {
+      const posts = postsQuery.read(model.posts)
+      expect(posts._tag).toBe('Refreshing')
+      if (posts._tag === 'Refreshing') {
+        expect(posts.data.posts).toEqual(fixturePosts)
       }
     }),
     Command.resolve(
       FetchPosts,
       postsQuery.Message.SettledFetch({
+        instanceId: 'posts',
+        requestId: 0,
         result: Result.succeed({
           posts: fixturePosts,
           fetchedAt: FETCHED_AT + 1000,
@@ -205,18 +220,22 @@ test('retrying failed posts shows the loading state and refetches', () => {
     update,
     given(
       modifyFields(loadedPostsModel, {
-        posts: () => ({
-          data: AsyncData.Failure({ error: 'The server is down.' }),
-        }),
+        posts: posts =>
+          modifyFields(posts, {
+            data: () => AsyncData.Failure({ error: 'The server is down.' }),
+            maybePendingRequestId: () => Option.none(),
+          }),
       }),
     ),
     message(Message.ClickedRetryPosts()),
-    model(model => {
+    model(function (model) {
       expect(postsQuery.read(model.posts)._tag).toBe('Loading')
     }),
     Command.resolve(
       FetchPosts,
       postsQuery.Message.SettledFetch({
+        instanceId: 'posts',
+        requestId: 0,
         result: Result.succeed({
           posts: fixturePosts,
           fetchedAt: FETCHED_AT,
@@ -229,18 +248,20 @@ test('retrying failed posts shows the loading state and refetches', () => {
   )
 })
 
-test('opening a post fetches it once and serves revisits from the Model', () => {
+test('opening a post fetches it, and Back forgets the slot', () => {
   story(
     update,
     given(loadedPostsModel),
     message(Message.ClickedPost({ postId: 'first-post' })),
-    model(model => {
-      expect(postDetailTag(model, 'first-post')).toBe('Loading')
+    model(function (current) {
+      expect(postDetailTag(current, 'first-post')).toBe('Loading')
     }),
     Command.resolve(
       FetchPostDetail,
       postDetailQuery.Message.SettledFetch({
+        instanceId: 'post-detail',
         args: { postId: 'first-post' },
+        requestId: 0,
         result: Result.succeed({
           detail: firstPostDetail,
           fetchedAt: FETCHED_AT,
@@ -248,11 +269,31 @@ test('opening a post fetches it once and serves revisits from the Model', () => 
       }),
     ),
     message(Message.ClickedBackToPosts()),
+    message(
+      Message.GotPostDetailMessage({
+        message: postDetailQuery.Message.UpdatedWatch({
+          live: HashMap.empty(),
+        }),
+      }),
+    ),
+    model(function (current) {
+      expect(postDetailTag(current, 'first-post')).toBe('Idle')
+    }),
     message(Message.ClickedPost({ postId: 'first-post' })),
-    Command.expectNone(),
-    model(model => {
-      expect(postDetailTag(model, 'first-post')).toBe('Success')
-      expect(model.maybeSelectedPostId).toEqual(Option.some('first-post'))
+    Command.resolve(
+      FetchPostDetail,
+      postDetailQuery.Message.SettledFetch({
+        instanceId: 'post-detail',
+        args: { postId: 'first-post' },
+        requestId: 1,
+        result: Result.succeed({
+          detail: firstPostDetail,
+          fetchedAt: FETCHED_AT,
+        }),
+      }),
+    ),
+    model(function (current) {
+      expect(postDetailTag(current, 'first-post')).toBe('Success')
     }),
   )
 })
@@ -265,11 +306,13 @@ test('a failed post detail fetch lands in Failure and retry refetches', () => {
     Command.resolve(
       FetchPostDetail,
       postDetailQuery.Message.SettledFetch({
+        instanceId: 'post-detail',
         args: { postId: 'first-post' },
+        requestId: 0,
         result: Result.fail('The connection dropped.'),
       }),
     ),
-    model(model => {
+    model(function (model) {
       expect(postDetailTag(model, 'first-post')).toBe('Failure')
     }),
     message(Message.ClickedRetryPostDetail({ postId: 'first-post' })),
@@ -279,14 +322,16 @@ test('a failed post detail fetch lands in Failure and retry refetches', () => {
     Command.resolve(
       FetchPostDetail,
       postDetailQuery.Message.SettledFetch({
+        instanceId: 'post-detail',
         args: { postId: 'first-post' },
+        requestId: 1,
         result: Result.succeed({
           detail: firstPostDetail,
           fetchedAt: FETCHED_AT,
         }),
       }),
     ),
-    model(model => {
+    model(function (model) {
       expect(postDetailTag(model, 'first-post')).toBe('Success')
     }),
   )
@@ -297,16 +342,15 @@ test('revisiting a post with a cached failure loads it again', () => {
     update,
     given(
       modifyFields(loadedPostsModel, {
-        postDetailById: () => ({
-          slots: HashMap.set(
-            postDetailQuery.init().slots,
-            encodeKey({ postId: 'first-post' }),
-            {
-              args: { postId: 'first-post' },
-              data: AsyncData.Failure({ error: 'The connection dropped.' }),
-            },
-          ),
-        }),
+        postDetailById: postDetailById =>
+          modifyFields(postDetailById, {
+            slots: slots =>
+              HashMap.set(slots, encodeKey({ postId: 'first-post' }), {
+                args: { postId: 'first-post' },
+                data: AsyncData.Failure({ error: 'The connection dropped.' }),
+                maybePendingRequestId: Option.none(),
+              }),
+          }),
       }),
     ),
     message(Message.ClickedPost({ postId: 'first-post' })),
@@ -317,11 +361,13 @@ test('revisiting a post with a cached failure loads it again', () => {
     Command.resolve(
       FetchPostDetail,
       postDetailQuery.Message.SettledFetch({
+        instanceId: 'post-detail',
         args: { postId: 'first-post' },
+        requestId: 0,
         result: Result.fail('The connection dropped.'),
       }),
     ),
-    model(model => {
+    model(function (model) {
       expect(postDetailTag(model, 'first-post')).toBe('Failure')
     }),
   )

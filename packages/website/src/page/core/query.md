@@ -2,15 +2,15 @@
 
 ## Overview
 
-`Query.define` is a remote-data Submodel. A Query Model stores one [AsyncData](/core/async-data) value. A KeyedQuery Model stores a `HashMap` of `{ args, data }` slots. Use `read` to access the data in either Model.
+`Query.define` is a remote-data Submodel. Both Query Models expose [AsyncData](/core/async-data) through `read`. A Query Model also keeps `instanceId`, `nextRequestId`, and `maybePendingRequestId`. A KeyedQuery keeps one `instanceId`, one `nextRequestId`, and a `HashMap` of slots. Each slot keeps `args`, `data`, and `maybePendingRequestId`. `read(model, args)` returns that slot's `AsyncData`, or `Idle` when the key is absent.
 
-Fetch is a [Command](/core/commands). `loadIfMissing`, `revalidate`, and `revalidateOrLoad` start that Command from the Model. A fetched result stays for the life of the owning Model. Parents fold child Messages with `query.lift`.
+Fetch is a [Command](/core/commands). `watch` and `forget` change which slots the Model keeps. `watchSubscription` is one [Subscription](/core/subscriptions) entry. Parents fold child Messages with `query.lift`.
 
 See [API Cache Query](/example-apps/api-cache-query) for a full app.
 
 ## Define a Query
 
-Pass `name`, `data`, `error`, and `execute`. The Model wraps the `AsyncData` codec for those schemas. `init` starts with `Idle` data. Read it with `query.read(model)`.
+Pass `name`, `data`, `error`, and `execute`. `read` returns the `AsyncData` for those schemas. `read(query.init(instanceId))` is `Idle`. Supply a distinct `instanceId` each time you replace a Query Model while its previous Fetch may still finish. The ID can come from the parent Model, keeping `init` pure.
 
 ::Snippet{name="queryDefine" label="Query.define"}
 
@@ -29,6 +29,20 @@ Add `args` for a KeyedQuery. Omit `toKey` to JSON-encode args. Read a slot with 
 A full `read` / `write` lens still infers the parent Model from `read`.
 
 ::Snippet{name="queryLift" label="query.lift"}
+
+## Watch and forget
+
+A single-slot Query watches a boolean. The Subscription produces `UpdatedWatch`. When `isWatching` is true, update loads missing data. When false, update sets `data` back to `Idle` and clears `maybePendingRequestId`. You can also call `watch` and `forget` directly.
+
+::Snippet{name="queryWatchFlag" label="single-slot watchSubscription"}
+
+A KeyedQuery watches the live args. `watch` takes an array. Both direct `watch` and the Subscription retain the last args when multiple entries have the same `toKey`. The Subscription's `UpdatedWatch` Message carries a `HashMap` of `toKey` to args. Missing keys load with `loadIfMissing`. Extra keys leave the map through `forget`. An empty array forgets every slot.
+
+A Fetch that is already running finishes. update ignores its `SettledFetch` when its `instanceId` differs from the current Model or its `requestId` is no longer pending. A late `SettledFetch` does not restore a forgotten slot.
+
+`watchSubscription` is one Subscription entry. It reuses that lift's `toParentMessage`.
+
+::Snippet{name="queryWatch" label="KeyedQuery watchSubscription"}
 
 ## Run outside of Foldkit
 
