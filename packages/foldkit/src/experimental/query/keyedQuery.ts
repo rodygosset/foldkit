@@ -4,6 +4,7 @@ import {
   Function,
   HashMap,
   HashSet,
+  Match,
   Number,
   Option,
   Order,
@@ -15,11 +16,13 @@ import {
 
 import * as AsyncData from '../../asyncData/index.js'
 import * as Command from '../../command/index.js'
+import * as Interruptible from '../../command/interruptible/index.js'
 import { defineMessageUnion } from '../../message/index.js'
 import { modifyFields } from '../../struct/index.js'
 import * as Update from '../../update/index.js'
 import {
   type AsyncDataTransition,
+  CancelIntent,
   type CompletedFetchOf,
   type FoldLens,
   type KeyedArgs,
@@ -28,6 +31,8 @@ import {
   type ParentFieldConfig,
   type QueryStore,
   applyTransition,
+  completeCancel,
+  encodeInterruptKey,
   isParentFieldConfig,
   liftChildFold,
   parentFieldToLens,
@@ -90,6 +95,8 @@ export type KeyedQueryConfig<
   Fields extends SyncFields,
   R,
 > = Readonly<{
+  /** Cancels pending Fetches when they are evicted or replaced. */
+  interrupt?: boolean
   name: Name
   data: Schema.Codec<A, AI, never, never>
   error: Schema.Codec<E, EI, never, never>
@@ -113,6 +120,33 @@ const makeKeyedQueryMessage = <A, AI, E, EI, Fields extends SyncFields>(
     },
   })
 
+const makeInterruptibleKeyedQueryMessage = <
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+>(
+  data: Schema.Codec<A, AI>,
+  error: Schema.Codec<E, EI>,
+  Args: Schema.Struct<Fields>,
+) =>
+  defineMessageUnion({
+    CompletedFetch: {
+      args: Args,
+      instanceId: Schema.String,
+      generation: Schema.Number,
+      result: Schema.Result(data, error),
+    },
+    CompletedCancelFetch: {
+      args: Args,
+      instanceId: Schema.String,
+      generation: Schema.Number,
+      outcome: Interruptible.Outcome,
+      intent: CancelIntent,
+    },
+  })
+
 /**
  * Schema-backed Message union dispatched when a KeyedQuery fetch completes.
  *
@@ -124,7 +158,10 @@ export type KeyedQueryMessage<
   E,
   EI,
   Fields extends SyncFields,
-> = ReturnType<typeof makeKeyedQueryMessage<A, AI, E, EI, Fields>>
+  Interrupt extends boolean = false,
+> = Interrupt extends true
+  ? ReturnType<typeof makeInterruptibleKeyedQueryMessage<A, AI, E, EI, Fields>>
+  : ReturnType<typeof makeKeyedQueryMessage<A, AI, E, EI, Fields>>
 
 /** Builds the Model Schema for a KeyedQuery. */
 export const makeKeyedQueryModel = <A, AI, E, EI, Fields extends SyncFields>(
@@ -147,6 +184,22 @@ export const makeKeyedQueryModel = <A, AI, E, EI, Fields extends SyncFields>(
   })
 }
 
+const makeInterruptibleKeyedQueryModel = <
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+>(
+  data: Schema.Codec<A, AI>,
+  error: Schema.Codec<E, EI>,
+  Args: Schema.Struct<Fields>,
+) =>
+  Schema.Struct({
+    ...makeKeyedQueryModel(data, error, Args).fields,
+    instanceId: Schema.String,
+  })
+
 /**
  * Model Schema for a KeyedQuery containing retained `AsyncData` entries.
  *
@@ -158,7 +211,10 @@ export type KeyedQueryModel<
   E,
   EI,
   Fields extends SyncFields,
-> = ReturnType<typeof makeKeyedQueryModel<A, AI, E, EI, Fields>>
+  Interrupt extends boolean = false,
+> = Interrupt extends true
+  ? ReturnType<typeof makeInterruptibleKeyedQueryModel<A, AI, E, EI, Fields>>
+  : ReturnType<typeof makeKeyedQueryModel<A, AI, E, EI, Fields>>
 
 /**
  * Submodel for fetching and retaining `AsyncData` values by argument key.
@@ -173,95 +229,126 @@ export interface KeyedQuery<
   EI,
   Fields extends SyncFields,
   R = never,
+  Interrupt extends boolean = false,
 > {
   /** Schema for this KeyedQuery's Model. */
-  readonly Model: KeyedQueryModel<A, AI, E, EI, Fields>
+  readonly Model: KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>
   /** Schema-backed union of Messages handled by this KeyedQuery. */
-  readonly Message: KeyedQueryMessage<A, AI, E, EI, Fields>
+  readonly Message: KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>
   /**
    * Command definition for matching this KeyedQuery's pending fetch in Story
    * and Scene tests. Start fetches through a loading operation so the Model
    * and request generation advance together; do not call this directly.
    */
-  readonly Fetch: Command.CommandDefinitionWithArgs<
-    `Fetch${Name}`,
-    {
-      readonly args: Schema.Struct<Fields>
-      readonly generation: typeof Schema.Number
-    },
-    Effect.Effect<
-      CompletedFetchOf<KeyedQueryMessage<A, AI, E, EI, Fields>>,
-      never,
-      R
-    >
-  >
+  readonly Fetch: Interrupt extends true
+    ? Interruptible.DefinitionWithArgs<
+        `Fetch${Name}`,
+        {
+          readonly args: Schema.Struct<Fields>
+          readonly instanceId: typeof Schema.String
+          readonly generation: typeof Schema.Number
+        },
+        Readonly<{ instanceId: string; generation: number }>,
+        Effect.Effect<
+          CompletedFetchOf<KeyedQueryMessage<A, AI, E, EI, Fields, true>>,
+          never,
+          R
+        >
+      >
+    : Command.CommandDefinitionWithArgs<
+        `Fetch${Name}`,
+        {
+          readonly args: Schema.Struct<Fields>
+          readonly generation: typeof Schema.Number
+        },
+        Effect.Effect<
+          CompletedFetchOf<KeyedQueryMessage<A, AI, E, EI, Fields>>,
+          never,
+          R
+        >
+      >
   /**
    * Creates a KeyedQuery Model for initial parent Model construction. Never
    * replace a live KeyedQuery with `init()`: it can reuse an in-flight request
-   * generation. Use `reset` instead.
+   * generation. Use `reset` instead. Interruptible Queries require an instance identifier.
    */
-  readonly init: () => KeyedQueryModel<A, AI, E, EI, Fields>['Type']
-  /** Clears every entry while preserving request identity. */
+  readonly init: Interrupt extends true
+    ? (
+        instanceId: string,
+      ) => KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type']
+    : () => KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type']
+  /** Clears every entry while preserving request identity and cancels pending work when interruption is enabled. */
   readonly reset: (
-    model: KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
+    model: KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
   ) => Update.Return<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type']
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type']
   >
   /** Reads one entry, returning `Idle` when that entry does not exist. */
   readonly read: (
-    model: KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
+    model: KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
     args: KeyedArgs<Fields>,
   ) => AsyncData.AsyncData<A, E>
-  /** Folds a keyed Fetch completion into the matching entry. */
+  /** Folds Fetch and cancellation completions into the matching entry. */
   readonly update: (
-    model: KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    message: KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    model: KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    message: KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
   ) => Update.Return<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type']
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
+    Interrupt extends true ? R : never
   >
   /** Refreshes a loaded entry and does nothing when it has no data. */
   readonly revalidate: Update.Fold<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
     KeyedArgs<Fields>,
     R
   >
   /** Loads a missing entry or refreshes a loaded entry. */
   readonly revalidateOrLoad: Update.Fold<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
     KeyedArgs<Fields>,
     R
   >
   /** Loads an entry only when it has no usable value. */
   readonly loadIfMissing: Update.Fold<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
     KeyedArgs<Fields>,
     R
   >
   /** Starts a new Fetch for an entry even when one is pending, retaining available data. */
-  readonly replace: KeyedQuery<Name, A, AI, E, EI, Fields, R>['loadIfMissing']
+  readonly replace: KeyedQuery<
+    Name,
+    A,
+    AI,
+    E,
+    EI,
+    Fields,
+    R,
+    Interrupt
+  >['loadIfMissing']
   /** Removes one entry while preserving request identity. */
   readonly forget: Update.Fold<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
     KeyedArgs<Fields>
   >
   /** Removes entries outside the supplied keys without fetching or changing retained entries. */
   readonly retainOnly: Update.Fold<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
     ReadonlyArray<KeyedArgs<Fields>>
   >
   /** Lifts this KeyedQuery's update and loading operations into a parent Model. */
   readonly lift: LiftKeyedQuery<
-    KeyedQueryModel<A, AI, E, EI, Fields>['Type'],
-    KeyedQueryMessage<A, AI, E, EI, Fields>['Type'],
+    KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
+    KeyedQueryMessage<A, AI, E, EI, Fields, Interrupt>['Type'],
     KeyedArgs<Fields>,
-    R
+    R,
+    Interrupt extends true ? R : never
   >
   /** Executes one keyed fetch directly and returns settled `AsyncData`. */
   readonly run: (
@@ -278,8 +365,43 @@ export function defineKeyedQuery<
   Fields extends SyncFields,
   R,
 >(
+  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R> &
+    Readonly<{ interrupt: true }>,
+): KeyedQuery<Name, A, AI, E, EI, Fields, R, true>
+export function defineKeyedQuery<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R,
+>(
+  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R> &
+    Readonly<{ interrupt?: false }>,
+): KeyedQuery<Name, A, AI, E, EI, Fields, R>
+export function defineKeyedQuery<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R,
+>(
   config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R>,
-): KeyedQuery<Name, A, AI, E, EI, Fields, R> {
+):
+  | KeyedQuery<Name, A, AI, E, EI, Fields, R, true>
+  | KeyedQuery<Name, A, AI, E, EI, Fields, R>
+export function defineKeyedQuery<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R,
+>(config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R>): unknown {
   const asyncData = AsyncData.Schema(config.data, config.error)
   type EntryData = typeof asyncData.schema.Type
   const Args = Schema.Struct(config.args)
@@ -292,30 +414,66 @@ export function defineKeyedQuery<
 
   const argsToKey = config.toKey ?? encodeKey(Args)
 
-  const Message = makeKeyedQueryMessage(config.data, config.error, Args)
-  type Message = KeyedQueryMessage<A, AI, E, EI, Fields>['Type']
+  const PlainMessage = makeKeyedQueryMessage(config.data, config.error, Args)
+  const InterruptibleMessage = makeInterruptibleKeyedQueryMessage(
+    config.data,
+    config.error,
+    Args,
+  )
+  const Message =
+    config.interrupt === true ? InterruptibleMessage : PlainMessage
+  type Message = typeof PlainMessage.Type | typeof InterruptibleMessage.Type
 
-  const Fetch = Command.define(`Fetch${config.name}`, {
+  const executeFetch = (args: Args) => pipe(config.execute(args), Effect.result)
+  const PlainFetch = Command.define(`Fetch${config.name}`, {
     args: { args: Args, generation: Schema.Number },
-    messages: [Message.CompletedFetch],
+    messages: [PlainMessage.CompletedFetch],
     execute: ({ args, generation }) =>
       pipe(
-        config.execute(args),
-        Effect.result,
-        Effect.map((result): typeof Message.CompletedFetch.Type =>
-          // NOTE: CompletedFetch's constructor input view rejects args that are already the decoded Type.
-          ({
+        executeFetch(args),
+        Effect.map((result): typeof PlainMessage.CompletedFetch.Type => ({
+          _tag: 'CompletedFetch',
+          args,
+          generation,
+          result,
+        })),
+      ),
+  })
+  const InterruptibleFetch = Command.define(`Fetch${config.name}`, {
+    args: { args: Args, instanceId: Schema.String, generation: Schema.Number },
+    messages: [
+      InterruptibleMessage.CompletedFetch,
+      InterruptibleMessage.CompletedCancelFetch,
+    ],
+    interrupt: {
+      keyFields: ['instanceId', 'generation'],
+      toKey: ({ instanceId, generation }) =>
+        encodeInterruptKey(instanceId, generation),
+    },
+    execute: ({ args, instanceId, generation }) =>
+      pipe(
+        executeFetch(args),
+        Effect.map(
+          (result): typeof InterruptibleMessage.CompletedFetch.Type => ({
             _tag: 'CompletedFetch',
             args,
+            instanceId,
             generation,
             result,
           }),
         ),
       ),
   })
+  const Fetch = config.interrupt === true ? InterruptibleFetch : PlainFetch
 
-  const Model = makeKeyedQueryModel(config.data, config.error, Args)
-  type Model = KeyedQueryModel<A, AI, E, EI, Fields>['Type']
+  const PlainModel = makeKeyedQueryModel(config.data, config.error, Args)
+  const InterruptibleModel = makeInterruptibleKeyedQueryModel(
+    config.data,
+    config.error,
+    Args,
+  )
+  const Model = config.interrupt === true ? InterruptibleModel : PlainModel
+  type Model = typeof PlainModel.Type | typeof InterruptibleModel.Type
   type UpdateReturn = Update.Return<Model, Message, R>
   type PureUpdateReturn = Update.Return<Model, Message>
 
@@ -342,14 +500,79 @@ export function defineKeyedQuery<
         generation: nextGeneration,
       }
     },
-    fetch: (args, generation) => Fetch({ args, generation }),
+    fetch: (model, args, generation) =>
+      config.interrupt === true && Predicate.hasProperty(model, 'instanceId')
+        ? InterruptibleFetch({ args, instanceId: model.instanceId, generation })
+        : PlainFetch({ args, generation }),
+    interrupt:
+      config.interrupt === true
+        ? (model, args, intent) => {
+            if (!Predicate.hasProperty(model, 'instanceId')) {
+              throw new Error('Interruptible KeyedQuery requires an instanceId')
+            }
+
+            const entry = Option.getOrThrow(
+              HashMap.get(model.entries, argsToKey(args)),
+            )
+
+            return InterruptibleFetch.Interrupt(
+              { instanceId: model.instanceId, generation: entry.generation },
+              (
+                outcome,
+              ): typeof InterruptibleMessage.CompletedCancelFetch.Type => ({
+                _tag: 'CompletedCancelFetch',
+                args,
+                instanceId: model.instanceId,
+                generation: entry.generation,
+                outcome,
+                intent,
+              }),
+            )
+          }
+        : undefined,
   }
 
-  const init = (): Model =>
-    Model.make({ entries: HashMap.empty(), generation: 0 })
-  const reset = (model: Model): PureUpdateReturn => ({
-    model: modifyFields(model, { entries: () => HashMap.empty() }),
-  })
+  const init = (instanceId?: string): Model => {
+    if (config.interrupt === true) {
+      if (instanceId === undefined) {
+        throw new Error('Interruptible KeyedQuery.init requires an instanceId')
+      }
+
+      return InterruptibleModel.make({
+        entries: HashMap.empty(),
+        generation: 0,
+        instanceId,
+      })
+    }
+
+    return PlainModel.make({ entries: HashMap.empty(), generation: 0 })
+  }
+  const evictEntries = (
+    model: Model,
+    nextEntries: Model['entries'],
+  ): PureUpdateReturn => {
+    const nextModel = modifyFields(model, { entries: () => nextEntries })
+    const interrupt = store.interrupt
+
+    if (interrupt !== undefined) {
+      const commands = pipe(
+        HashMap.toEntries(model.entries),
+        Array.filter(
+          ([key, entry]) =>
+            !HashMap.has(nextEntries, key) && AsyncData.isPending(entry.data),
+        ),
+        Array.map(([_key, entry]) =>
+          interrupt(model, entry.args, CancelIntent.Forget()),
+        ),
+      )
+
+      return { model: nextModel, commands }
+    }
+
+    return { model: nextModel }
+  }
+  const reset = (model: Model): PureUpdateReturn =>
+    evictEntries(model, HashMap.empty())
   const read = (model: Model, args: Args): EntryData => store.read(model, args)
 
   const liftTransition = (
@@ -365,14 +588,30 @@ export function defineKeyedQuery<
 
   const replace: Update.Fold<Model, Message, Args, R> = Function.dual(
     2,
-    (model: Model, args: Args): UpdateReturn =>
-      replaceEntry(store, model, args),
+    (model: Model, args: Args): UpdateReturn => {
+      if (
+        config.interrupt === true &&
+        AsyncData.isPending(store.read(model, args))
+      ) {
+        const nextModel = modifyFields(model, {
+          entries: HashMap.modify(argsToKey(args), entry =>
+            modifyFields(entry, { args: () => args }),
+          ),
+        })
+
+        return replaceEntry(store, nextModel, args)
+      }
+
+      return replaceEntry(store, model, args)
+    },
   )
   const forget: Update.Fold<Model, Message, Args> = Function.dual(
     2,
-    (model: Model, args: Args): PureUpdateReturn => ({
-      model: modifyFields(model, { entries: HashMap.remove(argsToKey(args)) }),
-    }),
+    (model: Model, args: Args): PureUpdateReturn => {
+      const forgottenKey = argsToKey(args)
+
+      return evictEntries(model, HashMap.remove(model.entries, forgottenKey))
+    },
   )
   const retainOnly: Update.Fold<
     Model,
@@ -385,47 +624,77 @@ export function defineKeyedQuery<
         Array.map(args, args => argsToKey(args)),
       )
 
-      return {
-        model: modifyFields(model, {
-          entries: HashMap.filter((_entry, key) =>
-            HashSet.has(retainedKeys, key),
-          ),
-        }),
-      }
+      return evictEntries(
+        model,
+        HashMap.filter(model.entries, (_entry, key) =>
+          HashSet.has(retainedKeys, key),
+        ),
+      )
     },
   )
 
-  const update = (model: Model, message: Message): PureUpdateReturn =>
-    Message.match<PureUpdateReturn>(message, {
-      CompletedFetch({ args, generation, result }) {
-        const key = argsToKey(args)
-        const maybeEntry = HashMap.get(model.entries, key)
+  const update = (model: Model, message: Message): UpdateReturn =>
+    pipe(
+      Match.value(message),
+      Match.withReturnType<UpdateReturn>(),
+      Match.tagsExhaustive({
+        CompletedFetch(message) {
+          const { args, generation, result } = message
+          if (
+            Predicate.hasProperty(message, 'instanceId') &&
+            (!Predicate.hasProperty(model, 'instanceId') ||
+              message.instanceId !== model.instanceId)
+          ) {
+            return { model }
+          }
 
-        if (Option.isNone(maybeEntry)) {
-          return { model }
-        }
+          const key = argsToKey(args)
+          const maybeEntry = HashMap.get(model.entries, key)
 
-        const entry = maybeEntry.value
+          if (Option.isNone(maybeEntry)) {
+            return { model }
+          }
 
-        if (
-          !AsyncData.isPending(entry.data) ||
-          generation !== entry.generation
-        ) {
-          return { model }
-        }
+          const entry = maybeEntry.value
 
-        return {
-          model: modifyFields(model, {
-            entries: HashMap.set(
-              key,
-              modifyFields(entry, {
-                data: () => AsyncData.settle(entry.data, result),
-              }),
-            ),
-          }),
-        }
-      },
-    })
+          if (
+            !AsyncData.isPending(entry.data) ||
+            generation !== entry.generation
+          ) {
+            return { model }
+          }
+
+          return {
+            model: modifyFields(model, {
+              entries: HashMap.set(
+                key,
+                modifyFields(entry, {
+                  data: () => AsyncData.settle(entry.data, result),
+                }),
+              ),
+            }),
+          }
+        },
+        CompletedCancelFetch({ args, instanceId, generation, intent }) {
+          if (
+            !Predicate.hasProperty(model, 'instanceId') ||
+            instanceId !== model.instanceId
+          ) {
+            return { model }
+          }
+
+          const maybeEntry = HashMap.get(model.entries, argsToKey(args))
+          if (
+            Option.isNone(maybeEntry) ||
+            maybeEntry.value.generation !== generation
+          ) {
+            return { model }
+          }
+
+          return completeCancel(store, model, maybeEntry.value.args, intent)
+        },
+      }),
+    )
 
   const liftFromLens = <ParentModel, ParentMessage>(
     lens: FoldLens<ParentModel, ParentMessage, Model, Message>,
@@ -445,10 +714,10 @@ export function defineKeyedQuery<
 
   function lift<ParentModel, ParentMessage>(
     config: ParentFieldConfig<ParentModel, ParentMessage, Model, Message>,
-  ): ReturnType<LiftKeyedQuery<Model, Message, Args, R>>
+  ): ReturnType<LiftKeyedQuery<Model, Message, Args, R, R>>
   function lift<ParentModel, ParentMessage>(
     config: FoldLens<ParentModel, ParentMessage, Model, Message>,
-  ): ReturnType<LiftKeyedQuery<Model, Message, Args, R>>
+  ): ReturnType<LiftKeyedQuery<Model, Message, Args, R, R>>
   function lift<ParentModel, ParentMessage>(
     config: LiftConfig<ParentModel, ParentMessage, Model, Message>,
   ) {
@@ -478,5 +747,5 @@ export function defineKeyedQuery<
     retainOnly,
     lift,
     run,
-  } satisfies KeyedQuery<Name, A, AI, E, EI, Fields, R>
+  }
 }

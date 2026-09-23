@@ -142,7 +142,21 @@ When the retained set follows parent Model state, apply `retainOnly` in the upda
 
 ::Snippet{name="queryRetainOnly" label="Retaining the selected post"}
 
-These operations do not interrupt running Commands. A completion for a forgotten entry is ignored, and a later Fetch uses a new generation. The [API Cache Query example](/example-apps/api-cache-query) retains the selected post and clears its detail when the user returns to the list.
+By default, these operations do not interrupt running Commands. A completion for a forgotten entry is ignored, and a later Fetch uses a new generation. The [API Cache Query example](/example-apps/api-cache-query) retains the selected post and clears its detail when the user returns to the list.
+
+## Interrupt Pending Fetches
+
+Set `interrupt: true` to stop pending Fetch Commands when entries are evicted or replaced. In this example, Cancel clears the posts Query and stops its pending Fetch. Reload replaces any pending Fetch with a new request:
+
+::Snippet{name="queryInterrupt" label="Cancelling and replacing a posts Fetch"}
+
+An interruptible Query's `init(instanceId)` requires a stable identifier for that Query instance within the application. Give independently mounted instances different identifiers. Fetch keys include the instance identifier and request generation, so cancelling an old request cannot stop a newer Fetch for the same entry. Default Queries keep `init()` and their existing Model and Message shapes.
+
+`posts.reset(model)` immediately clears the retained value and returns an Interrupt Command when a Fetch is pending. The `fetchPosts` Effect above passes the abort signal supplied by `Effect.tryPromise` to `fetch`, so interrupting that Effect also aborts the browser request. KeyedQuery's `forget` and `retainOnly` cancel only the pending Fetches they evict.
+
+When `replace` encounters pending work, it returns an Interrupt Command and keeps available data visible. The `GotPostsMessage` handler delegates `CompletedCancelFetch` through `posts.fold`, which starts the replacement even if the original Fetch has already finished. A stale cancellation cannot restart an evicted or superseded request.
+
+An interruptible Query's `update` and lifted `fold` include its execute services in their return types because cancellation can start the replacement Fetch. Eviction operations require no execute services. Without `interrupt: true`, running Fetches finish and stale completions are ignored.
 
 ## Test Query Commands
 

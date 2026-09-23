@@ -594,3 +594,5 @@ export { default as keyingIdentityNotDataRaw } from './keyingIdentityNotData.ts?
 export { default as keyingIdentityNotDataHighlighted } from './keyingIdentityNotData.ts?highlighted'
 export { default as queryRetainOnlyRaw } from './queryRetainOnly.ts?raw'
 export { default as queryRetainOnlyHighlighted } from './queryRetainOnly.ts?highlighted'
+export { default as queryInterruptRaw } from './queryInterrupt.ts?raw'
+export { default as queryInterruptHighlighted } from './queryInterrupt.ts?highlighted'
