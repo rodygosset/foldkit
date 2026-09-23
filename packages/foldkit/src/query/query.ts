@@ -2,12 +2,15 @@ import { Effect, Option, Schema, Stream, pipe } from 'effect'
 
 import * as AsyncData from '../asyncData/index.js'
 import * as Command from '../command/index.js'
+import type * as Interruptible from '../command/interruptible/index.js'
 import { defineMessageUnion } from '../message/index.js'
 import { modifyFields } from '../struct/index.js'
 import * as Subscription from '../subscription/subscription.js'
 import * as Update from '../update/index.js'
 import {
   type CacheStore,
+  CancelIntent,
+  FetchInterruptOutcome,
   type FoldLens,
   type LiftConfig,
   type LiftQuery,
@@ -15,6 +18,7 @@ import {
   type SettledFetchOf,
   allocateRequestId,
   applyPolicy,
+  completeCancel,
   isParentKeyFoldConfig,
   parentKeyToLens,
   replaceSlot,
@@ -27,6 +31,7 @@ export type QueryConfig<Name extends string, A, AI, E, EI, R> = Readonly<{
   data: Schema.Codec<A, AI, never, never>
   error: Schema.Codec<E, EI, never, never>
   execute: Effect.Effect<A, E, R>
+  interrupt?: boolean
 }>
 
 const makeQueryMessage = <A, AI, E, EI>(
@@ -39,6 +44,12 @@ const makeQueryMessage = <A, AI, E, EI>(
       instanceId: Schema.String,
       requestId: Schema.Number,
       result: Schema.Result(data, error),
+    },
+    CompletedCancelFetch: {
+      instanceId: Schema.String,
+      requestId: Schema.Number,
+      outcome: FetchInterruptOutcome,
+      intent: CancelIntent,
     },
   })
 
@@ -65,14 +76,29 @@ export type QueryModel<A, AI, E, EI> = ReturnType<
 >
 
 /** Single-slot remote-data Submodel. Read its `AsyncData` with `read`. */
-export interface Query<Name extends string, A, AI, E, EI, R = never> {
+export interface Query<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  R = never,
+  Interrupt extends boolean = false,
+> {
   readonly Model: QueryModel<A, AI, E, EI>
   readonly Message: QueryMessage<A, AI, E, EI>
-  readonly Fetch: Command.CommandDefinitionWithArgs<
-    `Fetch${Name}`,
-    { instanceId: typeof Schema.String; requestId: typeof Schema.Number },
-    Effect.Effect<SettledFetchOf<QueryMessage<A, AI, E, EI>>, never, R>
-  >
+  readonly Fetch: Interrupt extends true
+    ? Interruptible.DefinitionWithArgs<
+        `Fetch${Name}`,
+        { instanceId: typeof Schema.String; requestId: typeof Schema.Number },
+        { readonly instanceId: string },
+        Effect.Effect<SettledFetchOf<QueryMessage<A, AI, E, EI>>, never, R>
+      >
+    : Command.CommandDefinitionWithArgs<
+        `Fetch${Name}`,
+        { instanceId: typeof Schema.String; requestId: typeof Schema.Number },
+        Effect.Effect<SettledFetchOf<QueryMessage<A, AI, E, EI>>, never, R>
+      >
   readonly init: (instanceId: string) => QueryModel<A, AI, E, EI>['Type']
   readonly read: (
     model: QueryModel<A, AI, E, EI>['Type'],
@@ -158,27 +184,50 @@ export namespace Query {
 }
 
 export function defineQuery<Name extends string, A, AI, E, EI, R>(
+  config: QueryConfig<Name, A, AI, E, EI, R> & { readonly interrupt: true },
+): Query<Name, A, AI, E, EI, R, true>
+export function defineQuery<Name extends string, A, AI, E, EI, R>(
+  config: QueryConfig<Name, A, AI, E, EI, R> & { readonly interrupt?: false },
+): Query<Name, A, AI, E, EI, R, false>
+export function defineQuery<Name extends string, A, AI, E, EI, R>(
   config: QueryConfig<Name, A, AI, E, EI, R>,
-): Query<Name, A, AI, E, EI, R> {
+): Query<Name, A, AI, E, EI, R, true> | Query<Name, A, AI, E, EI, R, false>
+export function defineQuery<Name extends string, A, AI, E, EI, R>(
+  config: QueryConfig<Name, A, AI, E, EI, R>,
+): unknown {
   const Model = makeQueryModel(config.data, config.error)
   const Message = makeQueryMessage(config.data, config.error)
   type Message = QueryMessage<A, AI, E, EI>['Type']
-  const Fetch = Command.define(`Fetch${config.name}`, {
-    args: { instanceId: Schema.String, requestId: Schema.Number },
-    messages: [Message.SettledFetch],
-    execute: args =>
-      pipe(
-        config.execute,
-        Effect.result,
-        Effect.map(result =>
-          Message.SettledFetch({
-            instanceId: args.instanceId,
-            requestId: args.requestId,
-            result,
-          }),
-        ),
+  const FetchArgs = { instanceId: Schema.String, requestId: Schema.Number }
+  const executeFetch = (
+    args: Readonly<{ instanceId: string; requestId: number }>,
+  ) =>
+    pipe(
+      config.execute,
+      Effect.result,
+      Effect.map(result =>
+        Message.SettledFetch({
+          instanceId: args.instanceId,
+          requestId: args.requestId,
+          result,
+        }),
       ),
+    )
+  const PlainFetch = Command.define(`Fetch${config.name}`, {
+    args: FetchArgs,
+    messages: [Message.SettledFetch],
+    execute: executeFetch,
   })
+  const InterruptibleFetch = Command.define(`Fetch${config.name}`, {
+    args: FetchArgs,
+    messages: [Message.SettledFetch, Message.CompletedCancelFetch],
+    interrupt: {
+      keyFields: ['instanceId'],
+      toKey: (keyArgs: { readonly instanceId: string }) => keyArgs.instanceId,
+    },
+    execute: executeFetch,
+  })
+  const Fetch = config.interrupt === true ? InterruptibleFetch : PlainFetch
 
   type Model = typeof Model.Type
   type UpdateReturn = Update.Return<Model, Message, R>
@@ -202,6 +251,22 @@ export function defineQuery<Name extends string, A, AI, E, EI, R>(
     isCurrent: (model, _args, request) =>
       sameRequest(model.instanceId, model.maybePendingRequestId, request),
     load: (_args, request) => Fetch(request),
+    interrupt:
+      config.interrupt === true
+        ? (model, _args, intent) =>
+            Option.map(model.maybePendingRequestId, requestId =>
+              InterruptibleFetch.Interrupt(
+                { instanceId: model.instanceId },
+                outcome =>
+                  Message.CompletedCancelFetch({
+                    instanceId: model.instanceId,
+                    requestId,
+                    outcome,
+                    intent,
+                  }),
+              ),
+            )
+        : undefined,
   }
 
   function forgetSlot(model: Model): UpdateReturn {
@@ -209,12 +274,22 @@ export function defineQuery<Name extends string, A, AI, E, EI, R>(
       return { model }
     }
 
-    return {
-      model: modifyFields(model, {
-        data: () => AsyncData.Idle(),
-        maybePendingRequestId: () => Option.none(),
-      }),
+    const forgotten = modifyFields(model, {
+      data: () => AsyncData.Idle(),
+      maybePendingRequestId: () => Option.none(),
+    })
+    if (AsyncData.isPending(model.data) && store.interrupt !== undefined) {
+      const maybeInterrupt = store.interrupt(
+        model,
+        undefined,
+        CancelIntent.Forget(),
+      )
+      if (Option.isSome(maybeInterrupt)) {
+        return { model: forgotten, commands: [maybeInterrupt.value] }
+      }
     }
+
+    return { model: forgotten }
   }
 
   const revalidate = (model: Model): UpdateReturn =>
@@ -243,6 +318,13 @@ export function defineQuery<Name extends string, A, AI, E, EI, R>(
             maybePendingRequestId: () => Option.none(),
           }),
         }
+      },
+      CompletedCancelFetch({ instanceId, requestId, outcome, intent }) {
+        if (!store.isCurrent(model, undefined, { instanceId, requestId })) {
+          return { model }
+        }
+
+        return completeCancel(store, model, undefined, outcome, intent)
       },
     })
 
@@ -351,5 +433,5 @@ export function defineQuery<Name extends string, A, AI, E, EI, R>(
     lift,
     watchSubscription,
     run,
-  } satisfies Query<Name, A, AI, E, EI, R>
+  }
 }

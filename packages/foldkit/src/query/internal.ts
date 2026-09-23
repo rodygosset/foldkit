@@ -2,6 +2,9 @@ import { Effect, Match, Option, Predicate, Schema, pipe } from 'effect'
 
 import * as AsyncData from '../asyncData/index.js'
 import * as Command from '../command/index.js'
+import * as Interruptible from '../command/interruptible/index.js'
+import { defineMessageUnion } from '../message/index.js'
+import { defineTaggedUnion } from '../schema/index.js'
 import * as Subscription from '../subscription/subscription.js'
 import * as Update from '../update/index.js'
 
@@ -128,6 +131,20 @@ export const foldChildFromPolicy = <
     ...lens,
   })
 
+export const FetchInterruptOutcome = defineMessageUnion({
+  Interrupted: {},
+  NotFound: {},
+})
+
+/** Reason for cancelling a pending Query Fetch. */
+export const CancelIntent = defineTaggedUnion({
+  Replace: {},
+  Forget: {},
+})
+
+/** Reason carried by a completed Query Fetch cancellation. */
+export type CancelIntent = typeof CancelIntent.Type
+
 type Transition = <A, E>(
   data: AsyncData.AsyncData<A, E>,
 ) => Option.Option<AsyncData.AsyncData<A, E>>
@@ -178,6 +195,13 @@ export type CacheStore<Model, Args, A, E, Message, R> = Readonly<{
     args: Args,
     request: RequestIdentity,
   ) => Command.Command<Message, never, R>
+  interrupt:
+    | ((
+        model: Model,
+        args: Args,
+        intent: CancelIntent,
+      ) => Option.Option<Command.Command<Message, never, R>>)
+    | undefined
 }>
 
 export const applyPolicy = <Model, Args, A, E, Message, R>(
@@ -202,8 +226,16 @@ export function replaceSlot<Model, Args, A, E, Message, R>(
   model: Model,
   args: Args,
 ): Update.Return<Model, Message, R> {
-  if (!AsyncData.isPending(store.read(model, args)))
+  if (!AsyncData.isPending(store.read(model, args))) {
     return applyPolicy(store, model, args, 'revalidateOrLoad')
+  }
+
+  if (store.interrupt !== undefined) {
+    const maybeInterrupt = store.interrupt(model, args, CancelIntent.Replace())
+    if (Option.isSome(maybeInterrupt)) {
+      return { model, commands: [maybeInterrupt.value] }
+    }
+  }
 
   const begun = store.begin(model, args, store.read(model, args))
   return {
@@ -211,6 +243,28 @@ export function replaceSlot<Model, Args, A, E, Message, R>(
     commands: [store.load(args, begun.request)],
   }
 }
+
+export const completeCancel = <Model, Args, A, E, Message, R>(
+  store: CacheStore<Model, Args, A, E, Message, R>,
+  model: Model,
+  args: Args,
+  outcome: Interruptible.Outcome,
+  intent: CancelIntent,
+): Update.Return<Model, Message, R> =>
+  Interruptible.Outcome.match<Update.Return<Model, Message, R>>(outcome, {
+    Interrupted: () =>
+      CancelIntent.match<Update.Return<Model, Message, R>>(intent, {
+        Replace() {
+          const begun = store.begin(model, args, store.read(model, args))
+          return {
+            model: begun.model,
+            commands: [store.load(args, begun.request)],
+          }
+        },
+        Forget: () => ({ model }),
+      }),
+    NotFound: () => ({ model }),
+  })
 
 export const runExecute = <A, E, R>(
   execute: Effect.Effect<A, E, R>,

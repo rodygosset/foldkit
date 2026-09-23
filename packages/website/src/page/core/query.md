@@ -20,6 +20,16 @@ Add `args` for a KeyedQuery. Omit `toKey` to JSON-encode args. Read a slot with 
 
 `args` fields are `Schema.Codec`s with no encoding or decoding services.
 
+## Interrupt a fetch
+
+Omit `interrupt` and a running Fetch finishes. update ignores a `SettledFetch` whose `instanceId` differs from the current Model or whose `requestId` is no longer pending.
+
+Pass `interrupt: true` when forget or replace should stop that Effect. `init(instanceId)` stores the id on the Model. The interrupt key is that id. A KeyedQuery adds the slot key. Distinct instance IDs do not share an interrupt key.
+
+`CompletedCancelFetch` carries the `requestId` that was pending when the Interrupt Command was built. update starts the replacement only when that id is still pending.
+
+::Snippet{name="queryInterrupt" label="interrupt: true"}
+
 ## Lift into a parent
 
 `query.lift` returns a child record. Bind it as `postsChild`. Pass `toParentMessage`, the same adapter `Update.foldChild` takes. A `Got*` handler calls `postsChild.fold(model, message)`. Policy Steps live on the same record, such as `postsChild.revalidateOrLoad(model)`.
@@ -38,7 +48,7 @@ A single-slot Query watches a boolean. The Subscription produces `UpdatedWatch`.
 
 A KeyedQuery watches the live args. `watch` takes an array. Both direct `watch` and the Subscription retain the last args when multiple entries have the same `toKey`. The Subscription's `UpdatedWatch` Message carries a `HashMap` of `toKey` to args. Missing keys load with `loadIfMissing`. Extra keys leave the map through `forget`. An empty array forgets every slot.
 
-A Fetch that is already running finishes. update ignores its `SettledFetch` when its `instanceId` differs from the current Model or its `requestId` is no longer pending. A late `SettledFetch` does not restore a forgotten slot.
+Without `interrupt`, a Fetch that is already running finishes. update ignores its `SettledFetch` when its `instanceId` differs from the current Model or its `requestId` is no longer pending. A late `SettledFetch` does not restore a forgotten slot.
 
 `watchSubscription` is one Subscription entry. It reuses that lift's `toParentMessage`.
 

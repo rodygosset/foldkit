@@ -14,12 +14,15 @@ import {
 
 import * as AsyncData from '../asyncData/index.js'
 import * as Command from '../command/index.js'
+import type * as Interruptible from '../command/interruptible/index.js'
 import { defineMessageUnion } from '../message/index.js'
 import { modifyFields } from '../struct/index.js'
 import * as Subscription from '../subscription/subscription.js'
 import * as Update from '../update/index.js'
 import {
   type CacheStore,
+  CancelIntent,
+  FetchInterruptOutcome,
   type FoldLens,
   type KeyedArgs,
   type LiftConfig,
@@ -29,6 +32,7 @@ import {
   type SettledFetchOf,
   allocateRequestId,
   applyPolicy,
+  completeCancel,
   foldChildFromPolicy,
   isParentKeyFoldConfig,
   parentKeyToLens,
@@ -72,6 +76,7 @@ export type KeyedQueryConfig<
   execute: (
     args: Schema.Schema.Type<Schema.Struct<Fields>>,
   ) => Effect.Effect<A, E, R>
+  interrupt?: boolean
 }>
 
 const makeKeyedQueryMessage = <A, AI, E, EI, Fields extends SyncFields>(
@@ -86,6 +91,13 @@ const makeKeyedQueryMessage = <A, AI, E, EI, Fields extends SyncFields>(
       instanceId: Schema.String,
       requestId: Schema.Number,
       result: Schema.Result(data, error),
+    },
+    CompletedCancelFetch: {
+      args: Args,
+      instanceId: Schema.String,
+      requestId: Schema.Number,
+      outcome: FetchInterruptOutcome,
+      intent: CancelIntent,
     },
   })
 
@@ -135,22 +147,38 @@ export interface KeyedQuery<
   EI,
   Fields extends SyncFields,
   R = never,
+  Interrupt extends boolean = false,
 > {
   readonly Model: KeyedQueryModel<A, AI, E, EI, Fields>
   readonly Message: KeyedQueryMessage<A, AI, E, EI, Fields>
-  readonly Fetch: Command.CommandDefinitionWithArgs<
-    `Fetch${Name}`,
-    {
-      instanceId: typeof Schema.String
-      requestId: typeof Schema.Number
-      queryArgs: Schema.Struct<Fields>
-    },
-    Effect.Effect<
-      SettledFetchOf<KeyedQueryMessage<A, AI, E, EI, Fields>>,
-      never,
-      R
-    >
-  >
+  readonly Fetch: Interrupt extends true
+    ? Interruptible.DefinitionWithArgs<
+        `Fetch${Name}`,
+        {
+          instanceId: typeof Schema.String
+          requestId: typeof Schema.Number
+          queryArgs: Schema.Struct<Fields>
+        },
+        { readonly instanceId: string; readonly queryArgs: KeyedArgs<Fields> },
+        Effect.Effect<
+          SettledFetchOf<KeyedQueryMessage<A, AI, E, EI, Fields>>,
+          never,
+          R
+        >
+      >
+    : Command.CommandDefinitionWithArgs<
+        `Fetch${Name}`,
+        {
+          instanceId: typeof Schema.String
+          requestId: typeof Schema.Number
+          queryArgs: Schema.Struct<Fields>
+        },
+        Effect.Effect<
+          SettledFetchOf<KeyedQueryMessage<A, AI, E, EI, Fields>>,
+          never,
+          R
+        >
+      >
   readonly init: (
     instanceId: string,
   ) => KeyedQueryModel<A, AI, E, EI, Fields>['Type']
@@ -246,8 +274,45 @@ export function defineKeyedQuery<
   Fields extends SyncFields,
   R,
 >(
+  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R> & {
+    readonly interrupt: true
+  },
+): KeyedQuery<Name, A, AI, E, EI, Fields, R, true>
+export function defineKeyedQuery<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R,
+>(
+  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R> & {
+    readonly interrupt?: false
+  },
+): KeyedQuery<Name, A, AI, E, EI, Fields, R, false>
+export function defineKeyedQuery<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R,
+>(
   config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R>,
-): KeyedQuery<Name, A, AI, E, EI, Fields, R> {
+):
+  | KeyedQuery<Name, A, AI, E, EI, Fields, R, true>
+  | KeyedQuery<Name, A, AI, E, EI, Fields, R, false>
+export function defineKeyedQuery<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R,
+>(config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R>): unknown {
   const states = AsyncData.Schema(config.data, config.error)
   type SlotState = typeof states.schema.Type
   const Args = Schema.Struct(config.args)
@@ -261,6 +326,9 @@ export function defineKeyedQuery<
 
   const toKey = (args: Args): string =>
     config.toKey !== undefined ? config.toKey(args) : encodeKey(Args)(args)
+  const encodeInterruptKey = encodeKey(
+    Schema.Tuple([Schema.String, Schema.String]),
+  )
 
   const Message = makeKeyedQueryMessage(config.data, config.error, Args)
   type Message = KeyedQueryMessage<A, AI, E, EI, Fields>['Type']
@@ -271,25 +339,40 @@ export function defineKeyedQuery<
     queryArgs: Args,
   }
 
-  const Fetch = Command.define(`Fetch${config.name}`, {
+  const executeFetch = (
+    args: Readonly<{ instanceId: string; requestId: number; queryArgs: Args }>,
+  ) =>
+    pipe(
+      config.execute(args.queryArgs),
+      Effect.result,
+      Effect.map(function (result): typeof Message.SettledFetch.Type {
+        return {
+          _tag: 'SettledFetch',
+          args: args.queryArgs,
+          instanceId: args.instanceId,
+          requestId: args.requestId,
+          result,
+        }
+      }),
+    )
+  const PlainFetch = Command.define(`Fetch${config.name}`, {
     args: FetchArgs,
     messages: [Message.SettledFetch],
-    execute: args =>
-      pipe(
-        config.execute(args.queryArgs),
-        Effect.result,
-        Effect.map(function (result): typeof Message.SettledFetch.Type {
-          // NOTE: SettledFetch's constructor input view rejects args that are already the decoded Type.
-          return {
-            _tag: 'SettledFetch',
-            args: args.queryArgs,
-            instanceId: args.instanceId,
-            requestId: args.requestId,
-            result,
-          }
-        }),
-      ),
+    execute: executeFetch,
   })
+  const InterruptibleFetch = Command.define(`Fetch${config.name}`, {
+    args: FetchArgs,
+    messages: [Message.SettledFetch, Message.CompletedCancelFetch],
+    interrupt: {
+      keyFields: ['instanceId', 'queryArgs'],
+      toKey: (keyArgs: {
+        readonly instanceId: string
+        readonly queryArgs: Args
+      }) => encodeInterruptKey([keyArgs.instanceId, toKey(keyArgs.queryArgs)]),
+    },
+    execute: executeFetch,
+  })
+  const Fetch = config.interrupt === true ? InterruptibleFetch : PlainFetch
 
   const Model = makeKeyedQueryModel(config.data, config.error, Args)
   type Model = typeof Model.Type
@@ -325,6 +408,25 @@ export function defineKeyedQuery<
           sameRequest(model.instanceId, slot.maybePendingRequestId, request),
       }),
     load: (args, request) => Fetch({ ...request, queryArgs: args }),
+    interrupt:
+      config.interrupt === true
+        ? (model, args, intent) =>
+            Option.flatMap(HashMap.get(model.slots, toKey(args)), slot =>
+              Option.map(slot.maybePendingRequestId, requestId =>
+                InterruptibleFetch.Interrupt(
+                  { instanceId: model.instanceId, queryArgs: args },
+                  outcome => ({
+                    _tag: 'CompletedCancelFetch',
+                    args,
+                    instanceId: model.instanceId,
+                    requestId,
+                    outcome,
+                    intent,
+                  }),
+                ),
+              ),
+            )
+        : undefined,
   }
 
   const hasSlot = (model: Model, args: Args): boolean =>
@@ -333,11 +435,20 @@ export function defineKeyedQuery<
   function forgetSlot(model: Model, args: Args): UpdateReturn {
     if (!hasSlot(model, args)) return { model }
 
-    return {
-      model: modifyFields(model, {
-        slots: HashMap.remove(toKey(args)),
-      }),
+    const forgotten = modifyFields(model, {
+      slots: HashMap.remove(toKey(args)),
+    })
+    if (
+      AsyncData.isPending(store.read(model, args)) &&
+      store.interrupt !== undefined
+    ) {
+      const maybeInterrupt = store.interrupt(model, args, CancelIntent.Forget())
+      if (Option.isSome(maybeInterrupt)) {
+        return { model: forgotten, commands: [maybeInterrupt.value] }
+      }
     }
+
+    return { model: forgotten }
   }
 
   const toLiveSlots = (liveArgs: ReadonlyArray<Args>) =>
@@ -423,6 +534,13 @@ export function defineKeyedQuery<
             }),
           }),
         })
+      },
+      CompletedCancelFetch({ args, instanceId, requestId, outcome, intent }) {
+        if (!store.isCurrent(model, args, { instanceId, requestId })) {
+          return { model }
+        }
+
+        return completeCancel(store, model, args, outcome, intent)
       },
     })
 
@@ -530,5 +648,5 @@ export function defineKeyedQuery<
     lift,
     watchSubscription,
     run,
-  } satisfies KeyedQuery<Name, A, AI, E, EI, Fields, R>
+  }
 }
