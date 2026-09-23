@@ -32,7 +32,6 @@ import {
   allocateRequestId,
   applyPolicy,
   completeCancel,
-  createInstanceId,
   foldChildFromInform,
   isParentKeyFoldConfig,
   parentKeyToLens,
@@ -239,7 +238,11 @@ export interface KeyedQuery<
           R
         >
       >
-  readonly init: () => KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type']
+  readonly init: Interrupt extends true
+    ? (
+        instanceId: string,
+      ) => KeyedQueryModel<A, AI, E, EI, Fields, true>['Type']
+    : () => KeyedQueryModel<A, AI, E, EI, Fields, false>['Type']
   readonly read: (
     model: KeyedQueryModel<A, AI, E, EI, Fields, Interrupt>['Type'],
     args: KeyedArgs<Fields>,
@@ -876,8 +879,8 @@ export function defineInterruptibleKeyedQuery<
     update(model, toWatchMessage(liveArgs)),
   )
 
-  const init = (): Model => ({
-    instanceId: createInstanceId(),
+  const init = (instanceId: string): Model => ({
+    instanceId,
     nextRequestId: 0,
     slots: HashMap.empty(),
   })

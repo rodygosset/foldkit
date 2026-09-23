@@ -5,3 +5,5 @@ const postsQuery = Query.define({
   execute: fetchPosts,
   interrupt: true,
 })
+
+const posts = postsQuery.init('home')
