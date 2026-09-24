@@ -94,6 +94,13 @@ interface TypeDocTupleType<Self> {
   readonly elements: ReadonlyArray<Self>
 }
 
+interface TypeDocNamedTupleMemberType<Self> {
+  readonly type: 'namedTupleMember'
+  readonly name: string
+  readonly isOptional: boolean
+  readonly element: Self
+}
+
 interface TypeDocUnionType<Self> {
   readonly type: 'union'
   readonly types: ReadonlyArray<Self>
@@ -168,6 +175,7 @@ export type TypeDocType =
   | TypeDocArrayType<TypeDocType>
   | TypeDocRestType<TypeDocType>
   | TypeDocTupleType<TypeDocType>
+  | TypeDocNamedTupleMemberType<TypeDocType>
   | TypeDocUnionType<TypeDocType>
   | TypeDocIntersectionType<TypeDocType>
   | TypeDocReflectionType<Option.Option<TypeDocItem>>
@@ -190,6 +198,7 @@ type TypeDocTypeEncoded =
   | TypeDocArrayType<TypeDocTypeEncoded>
   | TypeDocRestType<TypeDocTypeEncoded>
   | TypeDocTupleType<TypeDocTypeEncoded>
+  | TypeDocNamedTupleMemberType<TypeDocTypeEncoded>
   | TypeDocUnionType<TypeDocTypeEncoded>
   | TypeDocIntersectionType<TypeDocTypeEncoded>
   | TypeDocReflectionType<TypeDocItemEncoded>
@@ -235,6 +244,14 @@ export const TypeDocTypeSchema = Schema.suspend(() =>
     Schema.Struct({
       type: Schema.Literal('tuple'),
       elements: Schema.Array(TypeDocTypeSchema),
+    }),
+    Schema.Struct({
+      type: Schema.Literal('namedTupleMember'),
+      name: Schema.String,
+      isOptional: Schema.Boolean.pipe(
+        Schema.withDecodingDefaultKey(Effect.succeed(false)),
+      ),
+      element: TypeDocTypeSchema,
     }),
     Schema.Struct({
       type: Schema.Literal('union'),

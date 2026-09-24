@@ -54,6 +54,14 @@ A Fetch that is already running finishes. update ignores its `SettledFetch` when
 
 ::Snippet{name="queryWatch" label="KeyedQuery watchSubscription"}
 
+## HttpApi
+
+`Query.HttpApi.Service.query` builds that same Submodel from an Effect HttpApi endpoint. An endpoint with no params, query, payload, or headers is a Query. Anything else is a KeyedQuery. The slot key is the JSON encoding of the client request.
+
+Omit the config and Fetch is not interruptible. Pass `{ interrupt: true }` after the endpoint name when forget or replace should stop that Effect. `init` then takes an `instanceId`, the same as `Query.define({ interrupt: true })`.
+
+See [API Cache HttpApi](/example-apps/api-cache-http-api) for a full app. That app omits the config.
+
 ## Run outside of Foldkit
 
 `Query.run` on a Query is an Effect that runs `execute` and returns settled `AsyncData`. KeyedQuery `run(args)` does the same for one slot. Neither writes a Model.

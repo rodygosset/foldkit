@@ -154,6 +154,7 @@ Some of what you can build with Foldkit. [See all example apps on foldkit.dev](h
 - **[Weather](https://foldkit.dev/example-apps/weather)**: HTTP requests with async state handling
 - **[API Cache](https://foldkit.dev/example-apps/api-cache)**: Query caching with stale-while-revalidate, request deduplication, and interval refetching
 - **[API Cache Query](https://foldkit.dev/example-apps/api-cache-query)**: The same app with `Query.define` owning fetch and keyed slots
+- **[API Cache HttpApi](https://foldkit.dev/example-apps/api-cache-http-api)**: The same Query app, built from Effect HttpApi endpoints
 - **[Routing](https://foldkit.dev/example-apps/routing)**: URL routing with parser combinators
 - **[Route Transitions](https://foldkit.dev/example-apps/route-transitions)**: Live transition log with entry, exit, and stayed navigation policies
 - **[Query Sync](https://foldkit.dev/example-apps/query-sync)**: URL query parameter sync with filtering and sorting
