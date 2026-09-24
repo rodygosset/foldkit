@@ -117,6 +117,48 @@ export const hasMessagePayloadProperty = (
         (isStringLiteral(property.key) && property.key.value === 'message')),
   )
 
+const isHttpApiQueryCall = (
+  node: ESTree.CallExpression,
+  references: WeakMap<ESTree.Node, Reference>,
+): boolean =>
+  Option.exists(staticMemberPath(node.callee), path => {
+    const [memberName, extraMember] = path.members
+    if (memberName !== 'query' || extraMember !== undefined) {
+      return false
+    }
+
+    if (Option.isSome(resolveImportedPath(references, path.root))) {
+      return true
+    }
+
+    return Option.exists(resolvedVariable(references, path.root), variable =>
+      variable.defs.some(definition => {
+        const declaration = definition.node
+        if (
+          declaration.type !== 'ClassDeclaration' ||
+          !isCallExpression(declaration.superClass) ||
+          !isCallExpression(declaration.superClass.callee)
+        ) {
+          return false
+        }
+
+        return Option.exists(
+          resolveFoldkitApiPath(
+            references,
+            declaration.superClass.callee.callee,
+          ),
+          apiPath => {
+            const apiName = apiPath.join('.')
+            return (
+              apiName === 'Query.HttpApi.Service' ||
+              apiName === 'Experimental.Query.HttpApi.Service'
+            )
+          },
+        )
+      }),
+    )
+  })
+
 const isLocalQueryMessageReference = (
   node: unknown,
   references: WeakMap<ESTree.Node, Reference>,
@@ -137,6 +179,10 @@ const isLocalQueryMessageReference = (
             !isCallExpression(definition.node.init)
           ) {
             return false
+          }
+
+          if (isHttpApiQueryCall(definition.node.init, references)) {
+            return true
           }
 
           return Option.exists(

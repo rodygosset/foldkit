@@ -158,6 +158,18 @@ When `replace` encounters pending work, it returns an Interrupt Command and keep
 
 An interruptible Query's `update` and lifted `fold` include its execute services in their return types because cancellation can start the replacement Fetch. Eviction operations require no execute services. Without `interrupt: true`, running Fetches finish and stale completions are ignored.
 
+## HttpApi
+
+`Query.HttpApi.Service.query` builds a Query from an Effect HttpApi endpoint. An endpoint with no params, query, payload, or headers produces a Query. Other endpoints produce a KeyedQuery whose args are the client request, using Query's default key encoding.
+
+Fetches are not interruptible by default and the resulting Query uses `init()`. Pass `{ interrupt: true }` after the endpoint name to enable interruption and use `init(instanceId)`, as with `Query.define`.
+
+Endpoints with multipart requests or streaming success responses are excluded, including endpoints that mix buffered and streaming responses. Request, success, and error codecs must require no encoding or decoding services.
+
+Transport, decoding, and client middleware failures become `HttpApiClientError`. Client middleware failures use `HttpApiMiddlewareClientError` as the reason and preserve the original failure in `cause`; declared endpoint and server middleware errors keep their original types. The middleware cause is preserved unchanged and must be JSON-compatible for Model serialization.
+
+See [API Cache HttpApi](/example-apps/api-cache-http-api) for a complete application using the default configuration.
+
 ## Test Query Commands
 
 The generated `Fetch` definition is public so Story and Scene tests can match and resolve the Command. Obtain application fetch Commands through `loadIfMissing`, `revalidate`, or `revalidateOrLoad`; calling `Fetch` directly would skip the Model transition and generation update that make completion handling safe.
