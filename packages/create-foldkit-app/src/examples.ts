@@ -10,6 +10,7 @@ export const EXAMPLE_VALUES = [
   'weather',
   'api-cache',
   'api-cache-query',
+  'api-cache-http-api',
   'charting',
   'routing',
   'route-transitions',
@@ -98,6 +99,12 @@ export const examples: ReadonlyArray<{
     title: 'api-cache-query',
     description:
       'The API Cache app rewritten with Query.define. Fetch and keyed slots live on the Query',
+  },
+  {
+    value: 'api-cache-http-api',
+    title: 'api-cache-http-api',
+    description:
+      'The same Query app, with Query.HttpApi.Service.query building each Submodel from an Effect HttpApi endpoint',
   },
   {
     value: 'charting',
