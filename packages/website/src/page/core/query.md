@@ -192,7 +192,29 @@ When the retained set follows parent Model state, apply `retainOnly` in the upda
 
 ### Superseded and Forgotten Fetches
 
-These operations do not interrupt a Fetch that is already running. Query ignores the result of a Fetch that `refetch` superseded and of a Fetch for a forgotten entry, and a later Fetch for that key uses a new generation. The [API Cache Query example](/example-apps/api-cache-query) keeps the two most recently opened posts and evicts older ones with `retainOnly`.
+By default, these operations do not interrupt a Fetch that is already running. Query ignores the result of a Fetch that `refetch` superseded and of a Fetch for a forgotten entry, and a later Fetch for that key uses a new generation. The [API Cache Query example](/example-apps/api-cache-query) keeps the two most recently opened posts and evicts older ones with `retainOnly`.
+
+## Interrupt Pending Fetches
+
+Set `interrupt: true` to stop pending Fetch Commands when entries are evicted or superseded by `refetch`. In this example, Cancel clears the posts Query and stops its pending Fetch. Reload calls `refetch`, which stops any pending Fetch and starts a new request:
+
+::Snippet{name="queryInterrupt" label="Cancelling and refetching a posts Fetch"}
+
+### Instance Identifiers
+
+An interruptible Query's `init(instanceId)` requires a stable identifier for that Query instance within the application. Give independently mounted instances different identifiers. Fetch keys include the instance identifier and request generation, so cancelling an old request cannot stop a newer Fetch for the same entry. Default Queries keep `init()` and their existing Model and Message shapes.
+
+### Evicting Entries
+
+`posts.reset(model)` immediately clears the retained value and returns an Interrupt Command when a Fetch is pending. The `fetchPosts` Effect above passes the abort signal supplied by `Effect.tryPromise` to `fetch`, so interrupting that Effect also aborts the browser request. KeyedQuery's `forget` and `retainOnly` cancel only the pending Fetches they evict.
+
+### Refetching Pending Work
+
+When `refetch` encounters pending work, it returns an Interrupt Command and keeps available data visible. The `GotPostsMessage` handler delegates `CompletedCancelFetch` through `posts.fold`, which starts the new Fetch even if the original Fetch has already finished. A stale cancellation cannot restart an evicted or superseded request.
+
+### Service Requirements
+
+An interruptible Query's `update` and lifted `fold` include its execute services in their return types because cancellation can start the Fetch that `refetch` requested. Eviction operations require no execute services. Without `interrupt: true`, running Fetches finish and stale completions are ignored.
 
 ## Test Query Commands
 
