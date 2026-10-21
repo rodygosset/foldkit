@@ -51,13 +51,28 @@ export function define<
   Fields extends SyncFields,
   R = never,
 >(
-  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R>,
+  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R> &
+    Readonly<{ interrupt: true }>,
+): KeyedQuery<Name, A, AI, E, EI, Fields, R, true>
+export function define<
+  Name extends string,
+  A,
+  AI,
+  E,
+  EI,
+  Fields extends SyncFields,
+  R = never,
+>(
+  config: KeyedQueryConfig<Name, A, AI, E, EI, Fields, R> &
+    Readonly<{ interrupt?: false }>,
 ): KeyedQuery<Name, A, AI, E, EI, Fields, R>
 export function define<Name extends string, A, AI, E, EI, R = never>(
-  config: QueryConfig<Name, A, AI, E, EI, R> & {
-    readonly args?: never
-    readonly toKey?: never
-  },
+  config: QueryConfig<Name, A, AI, E, EI, R> &
+    Readonly<{ interrupt: true; args?: never; toKey?: never }>,
+): Query<Name, A, AI, E, EI, R, true>
+export function define<Name extends string, A, AI, E, EI, R = never>(
+  config: QueryConfig<Name, A, AI, E, EI, R> &
+    Readonly<{ interrupt?: false; args?: never; toKey?: never }>,
 ): Query<Name, A, AI, E, EI, R>
 export function define(config: DefineConfig): unknown {
   if (isKeyedQueryConfig(config)) {

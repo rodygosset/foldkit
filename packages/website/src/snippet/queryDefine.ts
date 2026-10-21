@@ -3,7 +3,7 @@ const PostList = Schema.Array(Post)
 // The generated FetchPosts Command performs this Effect.
 const fetchPosts = Effect.gen(function* () {
   const response = yield* Effect.tryPromise({
-    try: () => fetch('/api/posts'),
+    try: signal => fetch('/api/posts', { signal }),
     catch: () => 'Could not load posts',
   })
 
