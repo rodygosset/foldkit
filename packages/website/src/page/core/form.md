@@ -26,7 +26,6 @@ Use Form for a flat set of fields. Each field holds one value: a scalar, or an i
 
 - Nested field paths, or per-element state inside an array field
 - Validation that depends on more than one field
-- Field errors returned by the server
 - Debouncing or cancelling async field checks
 
 Use [Field Validation](/core/field-validation) directly when the application needs a different field lifecycle.
@@ -110,6 +109,19 @@ Folding the `Submit` result moves the submission to `Succeeded` with the typed d
 
 While the submission is `Validating` or `Submitting`, another submit does nothing. Editing a field while `Validating` cancels the attempt. Editing a field while `Submitting` doesn't: the `Submit` Command already captured the values it sends. Editing after `Succeeded` or `Failed` returns the submission to `Idle`.
 
+### Show Submission Errors on Fields
+
+A server can reject a submission because of one field, for example an email that is already registered. `submit.toFieldErrors` takes the typed error and returns a message for each field it concerns. Form shows each message as that field's error, next to the input that caused it. Here `signUp` is an application function that returns an Effect, which fails with `SignupError`:
+
+::Snippet{name="formFieldErrors" label="Submission errors mapped to fields"}
+
+- The submission is `Failed` with the typed error whatever `toFieldErrors` returns. For an error that concerns no field, return `{}` and render the error from the submission.
+- A field keeps its mapped error until its value changes. A blur without a change keeps the error.
+- The next submit checks the field again and sends its value, so the server decides again.
+- `toFieldErrors` is available only when `submit.error` is present. TypeScript rejects a key that is not a field name.
+
+A message applies to a field only while it holds the value that was sent. If the person changed the field while the submission was pending, the field keeps the state of its new value.
+
 ### Stale Results
 
 Each submission attempt and each field check carries a generation number. Form accepts a result only when its generation matches the attempt or check it is waiting for. A result from before a reset, from an older attempt, or from a check that a later edit replaced leaves the Form unchanged. The generations are plain numbers in the Form Model.
@@ -138,6 +150,49 @@ Render from the Form's selectors rather than from its Model fields:
 A change marks the field touched and dirty. `isDirty` stays true even when the value returns to its default. `isDefaultValue` compares the current value with the default using the equivalence derived from the field's Schema, so arrays and records compare by content. Override that comparison with `Schema.overrideToEquivalence` on the field's Schema.
 
 Field values are immutable. Change a field by sending a Message with its complete new value, as the topics checkboxes in the example app do.
+
+## Derive a Form from a Schema
+
+When a Schema already describes what a form sends, such as the payload of a command your server accepts, `Form.fromSchema` builds the Form from that Schema. You don't write a field list. Each property of the Struct becomes a field, decoding a field's input with its property Schema is the field's validation, and the submission Effect receives the Struct value built from the decoded properties. The result has every operation of a `Form.define` definition, so you connect it to the parent and render it the same way.
+
+Here `scheduleTour` is an application function that returns an Effect, which fails with `ProspectBlocked`:
+
+::Snippet{name="formFromSchema" label="A Form derived from a Schema Struct"}
+
+`fromSchema` takes the same `submit` options as `Form.define`, including `toFieldErrors`. `fields` sets `validateOn` for each field that needs it.
+
+### Field Kinds
+
+The decoded type of each property decides the kind of its field. `form.kinds` holds the kind of each field, indexed by name:
+
+| Property type                                                 | Kind      | Field value                             |
+| ------------------------------------------------------------- | --------- | --------------------------------------- |
+| `string`, a template literal, or strings with string literals | `Text`    | The text as typed                       |
+| `number`                                                      | `Number`  | The text as typed                       |
+| `boolean`                                                     | `Boolean` | The checkbox state                      |
+| Union of string or number literals, or an enum                | `Choice`  | The chosen option as text, `''` if none |
+
+A property marked with `Schema.optionalKey` or `Schema.optional` is an optional field, and its kind has `isOptional: true`. When the text of an optional field is blank, the submission leaves the property out. A `Boolean` field always sends its state.
+
+A property of another type, such as an array or a date, has no field kind. TypeScript reports it on the `schema` option, and `fromSchema` throws if one reaches it at runtime. Write those Forms with `Form.define`.
+
+### Validation Messages
+
+A field is valid when its input decodes with its property Schema. Form shows the first message of a failed decode as the field's error, so the Schema's messages are the messages the person sees. Set them with the `message` annotation on the Schema and on its checks, as the example does.
+
+When a property is encoded as a string, such as `Schema.Trim` or `Schema.NumberFromString`, the text decodes through the property's codec, and the submission receives the transformed value. Other properties decode the text against their decoded type. A `Number` field reads its text as a finite number first. Text that is not a number, and blank text in a required field, get the message for the property's type, `Enter a number` in the example.
+
+Form checks each property on its own. A check on the whole Struct, such as two properties that must match, doesn't run in the Form.
+
+### Render Derived Fields
+
+Use `form.kinds` to choose the control for a field. A `Choice` kind carries its `options`:
+
+::Snippet{name="formFromSchemaView" label="Controls chosen by field kind"}
+
+### Edit an Existing Value
+
+`form.toInputs(value)` turns a decoded value, or part of one, into field inputs. Pass them to `init` or `reinitialize` to edit an existing record: `tourForm.init(tourForm.toInputs(tour))`.
 
 ## Test Form Commands
 

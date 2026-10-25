@@ -33,6 +33,7 @@ const FieldStatus = defineTaggedUnion({
   Validating: { generation: Schema.Number },
   Valid: {},
   Invalid: { errors: Schema.NonEmptyArray(Schema.String) },
+  Rejected: { errors: Schema.NonEmptyArray(Schema.String) },
 })
 type FieldStatus = typeof FieldStatus.Type
 
@@ -371,6 +372,26 @@ const Submission = <A, AI, E, EI>(
  */
 export type Submission<A, E> = ReturnType<typeof Submission<A, A, E, E>>['Type']
 
+/** Error messages for some of a Form's fields, indexed by field name. Returned
+ * by `submit.toFieldErrors` to show a submission error on the fields it
+ * concerns.
+ *
+ * @experimental Ships from `foldkit/experimental/form`; expect breaking changes while the API settles.
+ */
+export type FieldErrors<Name extends string> = Readonly<
+  Partial<Record<Name, string>>
+>
+
+type KeysOfUnion<T> = T extends unknown ? keyof T : never
+
+/** A `toFieldErrors` result whose keys, across every branch, name fields of
+ * the Form.
+ *
+ * @experimental Ships from `foldkit/experimental/form`; expect breaking changes while the API settles.
+ */
+export type ExactFieldErrors<Returned, Name extends string> = Returned &
+  Readonly<Partial<Record<Exclude<KeysOfUnion<Returned>, Name>, never>>>
+
 type FieldStates<Schemas extends FieldSchemas> = Readonly<{
   [Name in keyof Schemas & string]: FieldState<Schemas[Name]>
 }>
@@ -381,6 +402,7 @@ type FormState<Schemas extends FieldSchemas, A, E> = Simplify<
     submission: Submission<A, E>
     submitCount: number
     generation: number
+    maybeSubmittedValues: Option.Option<FormValues<Schemas>>
   }>
 >
 
@@ -401,7 +423,21 @@ const FormModel = <
     submission: Submission(data, error),
     submitCount: Schema.Number,
     generation: Schema.Number,
+    maybeSubmittedValues: Schema.OptionFromNullOr(FormValuesSchema(fields)),
   })
+
+const FormValuesSchema = <Schemas extends FieldSchemas, FieldRequirements>(
+  fields: FieldDefinitions<Schemas, FieldRequirements>,
+) =>
+  Schema.make<Schema.Codec<FormValues<Schemas>, FormValuesEncoded<Schemas>>>(
+    Schema.Struct(
+      mapFields<
+        Schemas,
+        Pick<Schemas, keyof Schemas & string>,
+        FieldRequirements
+      >(fields, (_name, definition) => definition.schema),
+    ).ast,
+  )
 
 /** The values returned by one Form definition's values selector. Used to
  * annotate functions that consume submitted values.
@@ -671,7 +707,12 @@ type ValidatorRequirements<Definition> = Definition extends {
 
 type RequirementsOf<Fields> = ValidatorRequirements<Fields[keyof Fields]>
 
-type SubmitEffectFor<SubmitEffect, A, E> = SubmitEffect &
+/** The submission Effect type, accepted only when its success and error types
+ * fit the Form's `data` and `error` Schemas.
+ *
+ * @experimental Ships from `foldkit/experimental/form`; expect breaking changes while the API settles.
+ */
+export type SubmitEffectFor<SubmitEffect, A, E> = SubmitEffect &
   ([Effect.Success<NoInfer<SubmitEffect>>] extends [NoInfer<A>]
     ? unknown
     : never) &
@@ -693,6 +734,7 @@ export function define<
   E,
   EI,
   SubmitEffect extends Effect.Effect<NoInfer<A>, NoInfer<E>, unknown>,
+  Returned extends FieldErrors<string> = {},
 >(
   config: Readonly<{
     name: string
@@ -705,6 +747,11 @@ export function define<
       execute: (
         values: NoInfer<FormValues<Schemas>>,
       ) => SubmitEffectFor<SubmitEffect, A, E>
+      toFieldErrors?:
+        | ((
+            error: NoInfer<E>,
+          ) => ExactFieldErrors<Returned, NoInfer<keyof Schemas & string>>)
+        | undefined
     }>
   }>,
 ): FormDefinition<
@@ -735,6 +782,7 @@ export function define<
       execute: (
         values: NoInfer<FormValues<Schemas>>,
       ) => SubmitEffectFor<SubmitEffect, A, never>
+      toFieldErrors?: undefined
     }>
   }>,
 ): FormDefinition<
@@ -753,6 +801,7 @@ export function define<
   E,
   EI,
   SubmitEffect extends Effect.Effect<void, NoInfer<E>, unknown>,
+  Returned extends FieldErrors<string> = {},
 >(
   config: Readonly<{
     name: string
@@ -765,6 +814,11 @@ export function define<
       execute: (
         values: NoInfer<FormValues<Schemas>>,
       ) => SubmitEffectFor<SubmitEffect, void, E>
+      toFieldErrors?:
+        | ((
+            error: NoInfer<E>,
+          ) => ExactFieldErrors<Returned, NoInfer<keyof Schemas & string>>)
+        | undefined
     }>
   }>,
 ): FormDefinition<
@@ -793,6 +847,7 @@ export function define<
       execute: (
         values: NoInfer<FormValues<Schemas>>,
       ) => SubmitEffectFor<SubmitEffect, void, never>
+      toFieldErrors?: undefined
     }>
   }>,
 ): FormDefinition<
@@ -823,6 +878,9 @@ export function define<
       execute: (
         values: NoInfer<FormValues<Schemas>>,
       ) => Effect.Effect<A | void, E, SubmitRequirements>
+      toFieldErrors?:
+        | ((error: E) => FieldErrors<keyof Schemas & string>)
+        | undefined
     }>
   }>,
 ): unknown {
@@ -841,15 +899,7 @@ export function define<
 
   const Message = FormMessage(definitions, data, error)
 
-  const valueSchemas = mapFields<
-    Schemas,
-    Pick<Schemas, keyof Schemas & string>,
-    FieldRequirements
-  >(definitions, (_name, definition) => definition.schema)
-
-  const Values = Schema.make<
-    Schema.Codec<FormValues<Schemas>, FormValuesEncoded<Schemas>>
-  >(Schema.Struct(valueSchemas).ast)
+  const Values = FormValuesSchema(definitions)
 
   const Submit = Command.define(`Submit${config.name}`, {
     args: { values: Values, token: SubmissionToken },
@@ -980,6 +1030,43 @@ export function define<
     ),
   })
 
+  function rejectFields(
+    fields: States,
+    error: E,
+    maybeSubmittedValues: Option.Option<FormValues<Schemas>>,
+  ): States {
+    if (
+      config.submit.toFieldErrors === undefined ||
+      Option.isNone(maybeSubmittedValues)
+    ) {
+      return fields
+    }
+
+    const fieldErrors = config.submit.toFieldErrors(error)
+    const submittedValues = maybeSubmittedValues.value
+
+    return mapFields<Schemas, States, FieldRequirements>(
+      definitions,
+      function (name) {
+        const state: FieldState<Schemas[typeof name]> = fields[name]
+        const message = fieldErrors[name]
+        const isSubmittedValue = definitions[name].equivalence(
+          submittedValues[name],
+          state.input.value,
+        )
+
+        if (message === undefined || !isSubmittedValue) {
+          return state
+        } else {
+          return {
+            ...state,
+            validation: FieldStatus.Rejected({ errors: [message] }),
+          }
+        }
+      },
+    )
+  }
+
   function init<Overrides extends Partial<FormInputs<Schemas>>>(
     overrides?: Overrides &
       Record<Exclude<keyof Overrides, keyof Schemas>, never>,
@@ -996,6 +1083,7 @@ export function define<
       submission: SubmissionState.Idle(),
       submitCount: 0,
       generation: 0,
+      maybeSubmittedValues: Option.none(),
     }
   }
 
@@ -1017,7 +1105,10 @@ export function define<
     return {
       value: state.input.value,
       errors:
-        state.validation._tag === 'Invalid' ? state.validation.errors : [],
+        state.validation._tag === 'Invalid' ||
+        state.validation._tag === 'Rejected'
+          ? state.validation.errors
+          : [],
       meta: {
         isTouched: state.isTouched,
         isBlurred: state.isBlurred,
@@ -1076,7 +1167,8 @@ export function define<
 
         const state: FieldState<Schemas[typeof name]> = model.fields[name]
         const fieldBlur =
-          definitions[name].validateOn === 'Blur'
+          definitions[name].validateOn === 'Blur' &&
+          state.validation._tag !== 'Rejected'
             ? validateField(name, state, {
                 mode: 'FirstError',
                 isSameValue: true,
@@ -1137,14 +1229,22 @@ export function define<
           return { model }
         }
 
-        const nextSubmission = Result.match(result, {
-          onFailure: error => SubmissionState.Failed({ error }),
-          onSuccess: data => SubmissionState.Succeeded({ data }),
+        return Result.match(result, {
+          onFailure: error => ({
+            model: modifyFields(model, {
+              fields: fields =>
+                rejectFields(fields, error, model.maybeSubmittedValues),
+              submission: () => SubmissionState.Failed({ error }),
+              maybeSubmittedValues: () => Option.none(),
+            }),
+          }),
+          onSuccess: data => ({
+            model: modifyFields(model, {
+              submission: () => SubmissionState.Succeeded({ data }),
+              maybeSubmittedValues: () => Option.none(),
+            }),
+          }),
         })
-
-        return {
-          model: modifyFields(model, { submission: () => nextSubmission }),
-        }
       },
     })
 
@@ -1168,6 +1268,7 @@ export function define<
         ),
       submission: () => SubmissionState.Idle(),
       submitCount: () => 0,
+      maybeSubmittedValues: () => Option.none(),
     }),
   })
 
@@ -1219,13 +1320,15 @@ export function define<
     }
 
     const { token } = model.submission
+    const submittedValues = values(model)
     const nextModel = modifyFields(model, {
       submission: () => SubmissionState.Submitting({ token }),
+      maybeSubmittedValues: () => Option.some(submittedValues),
     })
 
     return {
       model: nextModel,
-      commands: [Submit({ values: values(nextModel), token })],
+      commands: [Submit({ values: submittedValues, token })],
     }
   }
 

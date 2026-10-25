@@ -399,12 +399,15 @@ it('rejects compound values that fail decoded checks at input boundaries', () =>
       change: { name: 'topics', input: { value: ['Rejected'] } },
     }),
   ).toThrow()
+  const encoded = Schema.encodeSync(checked.Model)(initial)
+
+  expect(Schema.decodeSync(checked.Model)(encoded)).toEqual(initial)
   expect(() =>
     Schema.decodeSync(checked.Model)({
-      ...initial,
+      ...encoded,
       fields: {
         topics: {
-          ...initial.fields.topics,
+          ...encoded.fields.topics,
           defaultInput: { value: ['Rejected'] },
         },
       },
